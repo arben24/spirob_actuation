@@ -1,41 +1,63 @@
 #include "ForceSensorAnu78025.h"
-#include <Wire.h>
+
+#define TCA9548A_ADDR 0x70
 
 ForceSensorAnu78025::ForceSensorAnu78025(uint8_t i2cAddress, uint8_t multiplexerChannel)
-    : scaleFactor(1.0), offset(0), multiplexerChannel(multiplexerChannel), ready(false), filteredForce(0.0), bufferIndex(0) {
+    : i2cAddress(i2cAddress), multiplexerChannel(multiplexerChannel), 
+      scaleFactor(1.0), offset(0), ready(false), currentRaw(0), 
+      filteredWeight(0.0), bufferIndex(0) 
+{
     for (uint8_t i = 0; i < filterSize; i++) {
         forceBuffer[i] = 0.0;
     }
 }
 
 void ForceSensorAnu78025::selectChannel(uint8_t channel) {
-    Wire.beginTransmission(0x70); // TCA9548A address
+    Wire.beginTransmission(TCA9548A_ADDR);
     Wire.write(1 << channel);
     Wire.endTransmission();
 }
 
 bool ForceSensorAnu78025::begin() {
     selectChannel(multiplexerChannel);
+    
     if (scale.begin() == false) {
         return false;
     }
+
     scale.setGain(NAU7802_GAIN_128);
     scale.setSampleRate(NAU7802_SPS_80);
+    
+    // Calibrate AFE (Analog Front End)
     scale.calibrateAFE();
-    tare();
+    
     return true;
 }
 
 void ForceSensorAnu78025::tare() {
     selectChannel(multiplexerChannel);
-    if (scale.available()) {
-        scale.calculateZeroOffset(64);
-        offset = scale.getZeroOffset();
-    }
+    // Calculate zero offset with 64 samples for stable tare
+    scale.calculateZeroOffset(64);
+    offset = scale.getZeroOffset();
+    Serial.print("ANU78025 Tare Offset: ");
+    Serial.println(offset);
 }
 
-void ForceSensorAnu78025::setScale(float scale) {
-    scaleFactor = scale;
+void ForceSensorAnu78025::setCalibration(long offsetVal, float scaleVal) {
+    setOffset(offsetVal);
+    setScale(scaleVal);
+}
+
+void ForceSensorAnu78025::setOffset(long offsetVal) {
+    this->offset = offsetVal;
+    selectChannel(multiplexerChannel);
+    scale.setZeroOffset(offsetVal);
+}
+
+void ForceSensorAnu78025::setScale(float scaleVal) {
+    this->scaleFactor = scaleVal;
+    selectChannel(multiplexerChannel);
+    scale.setCalibrationFactor(scaleVal);
 }
 
 long ForceSensorAnu78025::readRaw() {
@@ -43,11 +65,17 @@ long ForceSensorAnu78025::readRaw() {
     if (scale.available()) {
         return scale.getReading();
     }
-    return 0;
+    return currentRaw;
+}
+
+float ForceSensorAnu78025::getWeight() {
+    // Return filtered mass in kg
+    return filteredWeight;
 }
 
 float ForceSensorAnu78025::getForce() {
-    return filteredForce;
+    // F = m * g (mass in kg * 9.81 m/s²)
+    return (filteredWeight/1000) * 9.80665f;
 }
 
 bool ForceSensorAnu78025::isReady() {
@@ -56,18 +84,25 @@ bool ForceSensorAnu78025::isReady() {
 
 void ForceSensorAnu78025::update() {
     selectChannel(multiplexerChannel);
+    
     if (scale.available()) {
         long raw = scale.getReading();
-        float force = (raw - offset) * scaleFactor;
-        forceBuffer[bufferIndex] = force;
+        currentRaw = raw;
+        
+        // Calculate mass in kg: (raw - offset) / scaleFactor
+        // scaleFactor is "raw counts per kg"
+        float weight_kg = (float)(raw - offset) / scaleFactor;
+        
+        // Apply moving-window filter
+        forceBuffer[bufferIndex] = weight_kg;
         bufferIndex = (bufferIndex + 1) % filterSize;
-        float sum = 0.0;
+        
+        float sum = 0.0f;
         for (uint8_t i = 0; i < filterSize; i++) {
             sum += forceBuffer[i];
         }
-        filteredForce = sum / filterSize;
+        filteredWeight = sum / filterSize;
+        
         ready = true;
-    } else {
-        ready = false;
     }
 }

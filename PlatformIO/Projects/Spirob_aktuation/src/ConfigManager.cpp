@@ -1,7 +1,7 @@
 #include "ConfigManager.h"
 
 ConfigManager::ConfigManager() {
-    prefs.begin("actuation", false);
+    ;
 }
 
 ConfigManager::~ConfigManager() {

@@ -20,6 +20,7 @@ void PidController::setSetpoint(float sp) {
 
 float PidController::update(float measurement, float now) {
     float error = setpoint - measurement;
+    Serial.printf("PID Update: Setpoint=%.3f, Measurement=%.3f, Error=%.3f\n", setpoint, measurement, error);
     float dt = (lastTime > 0) ? (now - lastTime) / 1000.0f : 0.0f;
     if (dt < 0.001f) dt = 0.001f;
     lastTime = now;

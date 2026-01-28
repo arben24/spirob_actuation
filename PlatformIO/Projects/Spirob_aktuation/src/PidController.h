@@ -13,7 +13,7 @@ private:
     float outMin, outMax;
 
 public:
-    PidController(float kp = 1.0, float ki = 0.0, float kd = 0.0, float outMin = -1000.0, float outMax = 1000.0);
+    PidController(float kp = 10.0, float ki = 0.0, float kd = 0.0, float outMin = -1000.0, float outMax = 1000.0);
     void setTunings(float kp, float ki, float kd);
     void setOutputLimits(float min, float max);
     void setSetpoint(float sp);

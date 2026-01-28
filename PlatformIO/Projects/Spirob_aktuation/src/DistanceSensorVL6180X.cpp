@@ -1,33 +1,30 @@
 #include "DistanceSensorVL6180X.h"
 
-DistanceSensorVL6180X::DistanceSensorVL6180X(uint8_t channel) : multiplexerChannel(channel), windowIndex(0), windowCount(0), filteredDistance(0.0) {
+DistanceSensorVL6180X::DistanceSensorVL6180X(uint8_t channel) : multiplexerChannel(channel), windowIndex(0), windowCount(0), filteredDistance(0.0), lastStatus(0) {
     for (uint8_t i = 0; i < windowSize; i++) {
         window[i] = 0;
     }
 }
 
-void DistanceSensorVL6180X::selectChannel(uint8_t channel) {
-    Wire.beginTransmission(0x70);
+bool DistanceSensorVL6180X::selectChannel(uint8_t channel) {
+    Wire.beginTransmission(0x70); // TCA9548A I2C multiplexer address
     Wire.write(1 << channel);
-    Wire.endTransmission();
+    return Wire.endTransmission() == 0; // Return true if successful
 }
 
 bool DistanceSensorVL6180X::begin() {
-    selectChannel(multiplexerChannel);
+    if (!selectChannel(multiplexerChannel)) {
+        return false; // Multiplexer not reachable
+    }
     if (!sensor.begin()) {
         return false;
     }
-    // Set recommended registers
-    Wire.beginTransmission(0x29);
-    Wire.write(0x00); Wire.write(0x11); Wire.write(0x10);
-    Wire.write(0x00); Wire.write(0x10); Wire.write(0x30);
-    Wire.write(0x00); Wire.write(0x0F); Wire.write(0x46);
-    Wire.write(0x00); Wire.write(0x31); Wire.write(0xFF);
-    Wire.write(0x00); Wire.write(0x41); Wire.write(0x63);
-    Wire.write(0x00); Wire.write(0x2E); Wire.write(0x01);
-    Wire.write(0x00); Wire.write(0x14); Wire.write(0x24);
+    // Set Max Convergence Time to 50ms to fix VL6180X_ERROR_EARLY_CONVERGENCE_ESTIMATE (Status 6)
+    Wire.beginTransmission(0x29); // VL6180X I2C address
+    Wire.write(0x00); Wire.write(0x1C); Wire.write(0x32); // Register 0x001C = 0x32 (50ms)
     Wire.endTransmission();
-    sensor.startRangeContinuous(10);
+    // Start continuous ranging with 50ms interval to avoid timing issues
+    sensor.startRangeContinuous(50);
     return true;
 }
 
@@ -54,15 +51,20 @@ void DistanceSensorVL6180X::computeStats(float &mean, float &stddev) {
 }
 
 void DistanceSensorVL6180X::update() {
-    selectChannel(multiplexerChannel);
+    if (!selectChannel(multiplexerChannel)) {
+        return; // Skip if multiplexer not accessible
+    }
     if (sensor.isRangeComplete()) {
-        uint8_t range = sensor.readRangeResult();
         uint8_t status = sensor.readRangeStatus();
-        if (status == VL6180X_ERROR_NONE && range != 0) {
-            pushSample(range);
-            float mean, stddev;
-            computeStats(mean, stddev);
-            filteredDistance = mean;
+        lastStatus = status; // Always update last status for debugging
+        if (status == VL6180X_ERROR_NONE) {
+            uint8_t range = sensor.readRangeResult();
+            if (range != 0) { // Ensure valid range value
+                pushSample(range);
+                float mean, stddev;
+                computeStats(mean, stddev);
+                filteredDistance = mean;
+            }
         }
     }
 }
@@ -72,5 +74,13 @@ float DistanceSensorVL6180X::getDistance() {
 }
 
 bool DistanceSensorVL6180X::isReady() {
-    return windowCount > 0;
+    return windowCount >= 5; // Require at least 5 samples to avoid initial noise
+}
+
+uint8_t DistanceSensorVL6180X::getLastStatus() {
+    return lastStatus;
+}
+
+uint8_t DistanceSensorVL6180X::getWindowCount() {
+    return windowCount;
 }

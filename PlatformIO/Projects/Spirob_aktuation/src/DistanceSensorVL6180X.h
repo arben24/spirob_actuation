@@ -13,8 +13,9 @@ private:
     uint8_t windowIndex;
     uint8_t windowCount;
     float filteredDistance;
+    uint8_t lastStatus;
 
-    void selectChannel(uint8_t channel);
+    bool selectChannel(uint8_t channel);
     void pushSample(uint16_t v);
     void computeStats(float &mean, float &stddev);
 
@@ -24,6 +25,8 @@ public:
     void update();
     float getDistance();
     bool isReady();
+    uint8_t getLastStatus();
+    uint8_t getWindowCount();
 };
 
 #endif

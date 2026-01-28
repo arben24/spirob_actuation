@@ -2,8 +2,15 @@
 
 SafetyManager::SafetyManager() : state(STATE_NORMAL), alarmReason("") {}
 
-void SafetyManager::setMotor(int index, MotorController* motor) {
-    if (index < 2) motors[index] = motor;
+void SafetyManager::setMotorDriver(int index, MotorDriver* motorDriver) {
+    if (index < 2) motorDrivers[index] = motorDriver;
+}
+
+void SafetyManager::setSensors(int index, ForceSensor* fs, DistanceSensorVL6180X* ds) {
+    if (index < 2) {
+        forceSensors[index] = fs;
+        distanceSensors[index] = ds;
+    }
 }
 
 void SafetyManager::setLimits(int index, float maxF, float minD, float maxD) {
@@ -17,22 +24,19 @@ void SafetyManager::setLimits(int index, float maxF, float minD, float maxD) {
 void SafetyManager::checkLimits() {
     if (state == STATE_ALARM) return;
     for (int i = 0; i < 2; i++) {
-        if (motors[i]) {
-            float force = motors[i]->getForce();
-            float dist = motors[i]->getDistance();
+        if (forceSensors[i] && distanceSensors[i]) {
+            float force = forceSensors[i]->getForce();
+            float dist = distanceSensors[i]->getDistance();
             if (force > maxForce[i]) {
                 state = STATE_ALARM;
                 alarmReason = "Force exceeded on motor " + String(i);
-                // Stop motors
-                motors[i]->setMode(MODE_MANUAL_POSITION);
-                motors[i]->setManualPosition(0);
+                motorDrivers[i]->stop();
                 return;
             }
             if (dist < minDistance[i] || dist > maxDistance[i]) {
                 state = STATE_ALARM;
                 alarmReason = "Distance out of range on motor " + String(i);
-                motors[i]->setMode(MODE_MANUAL_POSITION);
-                motors[i]->setManualPosition(0);
+                motorDrivers[i]->stop();
                 return;
             }
         }
@@ -51,9 +55,9 @@ bool SafetyManager::resetAlarm() {
     // Check if conditions are safe
     bool safe = true;
     for (int i = 0; i < 2; i++) {
-        if (motors[i]) {
-            float force = motors[i]->getForce();
-            float dist = motors[i]->getDistance();
+        if (forceSensors[i] && distanceSensors[i]) {
+            float force = forceSensors[i]->getForce();
+            float dist = distanceSensors[i]->getDistance();
             if (force > maxForce[i] || dist < minDistance[i] || dist > maxDistance[i]) {
                 safe = false;
             }

@@ -11,6 +11,9 @@ private:
 public:
     ConfigManager();
     ~ConfigManager();
+    void begin() {
+        prefs.begin("actuation", false);
+    }
     void saveForceSensorConfig(int channel, ForceSensorConfig config);
     ForceSensorConfig loadForceSensorConfig(int channel);
     void savePidTunings(int channel, float kp, float ki, float kd);

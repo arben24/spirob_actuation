@@ -1,109 +1,100 @@
 # AI Coding Agent Instructions for Spirob Aktuation
 
 ## Project Overview
-ESP32-based robotics actuation system with force/position control. Integrates dual-actuator servo control with force sensors (HX711/ANU78025), PID regulation, safety limits, and a Python GUI for user control. Designed for LeRobot AI integration.
+ESP32-based dual-motor servo control system with real-time force regulation via PID loops. Features polymorphic sensor abstraction (HX711 + NAU7802 load cells), ServoSerial UART communication, CLI command parsing, and CustomTkinter GUI for remote operation. Architecture emphasizes non-blocking main loop design and compile-time calibration via `#define` constants.
 
-## Firmware Architecture (main.cpp)
+## Critical Architecture Decisions
 
-**Dual-motor setup** with mixed sensor types:
-- **Motor 0**: Servo ID 1 + HX711 (GPIO 12/13)
-- **Motor 1**: Servo ID 2 + NAU78025 via I2C Multiplexer (0x70), channel 2
+**Index vs ID Confusion (MUST understand):**
+- Code uses array indices `[0]`, `[1]` everywhere BUT serial protocol uses Servo IDs `1`, `2`
+- Index 0 → Servo ID 1 (HX711) | Index 1 → Servo ID 2 (NAU7802)
+- All CLI commands and internal calls use indices; ServoSerial protocol uses IDs
+- MotorDriver constructor takes Servo ID, but stored in `motors[array_index]`
 
-**Polymorphic sensor array**: `ForceSensor* sensors[2]` accepts both HX711 and ANU78025 implementations
+**Hardware Wiring:**
+- **Motor[0]**: Servo ID 1 + HX711 (GPIO 26=data, 27=clock) 
+- **Motor[1]**: Servo ID 2 + NAU7802 (I2C 0x2A, mux channel 2)
+- **Servo UART**: Serial2 @ 1Mbps (pins 16/17)
+- **Debug UART**: 115200 baud (production) or 460800 (system ID fw)
 
-**Initialization sequence** (setup()):
-1. Serial/Wire/Serial2 init
-2. Per-motor: MotorDriver → ForceSensor (polymorphic) → ForceControlLoop
-3. Load static calibration from `#define` constants
-4. Print status
+**Design Philosophy:**
+- **Calibration**: Static `#define` offsets + scale factors in `main.cpp` (compiled once, not runtime NVS)
+- **Sensor Abstraction**: Polymorphic `ForceSensor* sensors[2]` (unified interface for HX711 + NAU7802)
+- **Non-blocking**: All sensor `update()` calls return immediately; data via getters (`getForce()`, `getWeight()`)
+- **State Decoupling**: `isRunning[i]` flag independent from control loop state; motor won't auto-stop
 
-**Main loop** (loop()):
-1. `sensors[i]->update()` - Non-blocking polling for all sensors
-2. `controlLoops[i]->update(dt)` - PID control if running
-3. Serial command parsing (CLI)
-4. Status output 10Hz
+## Main Loop Execution (loop())
 
-**Key design decisions**:
-- No SafetyManager/ConfigManager in main.cpp (simplified production firmware)
-- Static calibration via `#define` (no NVS persistence needed)
-- Isolated test environments for tuning (`test_one_motor_force_control`, `test_hx711`, `test_anu78025`)
+**Tight update cycle (lines 196-220 in main.cpp):**
+1. `sensors[i]->update()` - Non-blocking poll; if new ADC data, applies scale & 10-sample moving-window filter
+2. If `isRunning[i] == true`: `controlLoops[i]->update()` returns speed → `motors[i]->setSpeed(speed)`
+3. Serial parse (blocking on `Serial.available()` + `readStringUntil('\n')`)
+4. Status print throttled at 10Hz via `lastStatusPrint` + `STATUS_INTERVAL = 1000ms`
 
-## Critical System Patterns
+**State Tracking:**
+- `isRunning[i]` is independent ON/OFF flag (set by `start`/`stop` CLI commands)
+- Control loop only executes when `isRunning[i] == true`; motor WON'T auto-stop after regulation ends
+- Force setpoint updates via `set` command work regardless of `isRunning` state
 
-**Initialization Sequence** (`setup()`):
-1. Serial/Wire init, servo serial (Serial2) at 1Mbps
-2. Per-actuator: MotorDriver → ForceSensor → DistanceSensor → ForceControlLoop
-3. ConfigManager loads PID tunings from NVS; SafetyManager registers all components with limits
+**Sensor Data Flow** (both HX711 + NAU7802):
+- Raw ADC → apply `FORCE_OFFSET_X`, `FORCE_SCALE_X` (loaded at compile) → moving-avg filter → cache in class
+- `getWeight()` returns mass_kg; `getForce()` returns force_N = mass_kg × 9.81
+- Filter prevents PID oscillation; 10-sample window = ~100ms of history
 
-**Control Modes** (set via `m <id> <mode>` command):
-- `0` = MANUAL_POSITION: Direct position setpoint sent to servo
-- `1` = PID_FORCE: Force setpoint; PID output drives servo speed
-- `2` = WHEEL: Continuous rotation mode
-
-**Force Sensor Workflow**:
-- Calibration: `cal_tare:<id>` → zero reference, `cal_weight:<id>:<kg>` → set known load, `cal_save:<id>` → compute scale factor
-- Data: Non-blocking polling; moving-window averaging (10 samples); scale factor applied during `getForce()` call
-- Units: Always kg (scale factor is "kg per ADC count")
-
-**Safety System** (`SafetyManager::checkLimits()`):
-- Monitors force (soft limit = 1.2 × nominal load) and distance (20-65mm range)
-- Enters STATE_ALARM on violation → all motors stop
-- `alarm_reset` command clears alarm if limits now safe
+**Safety (test builds only):**
+- `SafetyManager::checkLimits()` monitors force + distance, triggers STATE_ALARM → motors stop
+- Production main.cpp does NOT include SafetyManager (simplification)
 
 ## Serial Command API
 
-**Quick Reference** (supported by all environments):
+**Implemented Commands** (from [src/main.cpp](src/main.cpp#L193-L395)):
 ```
-set <id> <kg>            # Set force setpoint (id: 0-1, or 'all')
-start <id>               # Start force regulation
-stop <id>                # Stop regulation (motor stops)
-pid <id> <kp> <ki> <kd>  # Live tune PID
-tare <id>                # Tare sensor (zero-point calibration)
-status                   # Print current status
-help                     # Show command help
-```
-
-**Examples**:
-```
-set 0 2.5      # Motor 0: setpoint = 2.5 kg
-start all      # Start both motors
-pid 1 350 0.8 45  # Motor 1: Kp=350, Ki=0.8, Kd=45
-stop all       # Stop both motors
+set <id> <N>             # Force setpoint in Newtons (id: 0-1, or 'all')
+start <id>               # Begin force regulation; sets motor MODE_WHEEL
+stop <id>                # Stop regulation; calls motor->stop()
+pid <id> <kp> <ki> <kd>  # Live-tune PID gains (no persistence; resets on restart)
+fast_print               # Enable 10Hz continuous status streaming
+status                   # Print single status snapshot
+help                     # Show available commands
 ```
 
-**Output** (10Hz):
-```
-M0: Force=0.123/2.500 kg | Pos= 1234 | Speed=  500 | RUN
-M1: Force=1.456/0.000 kg | Pos= 5678 | Speed=    0 | STOP
-```
+**Notes:**
+- `<id>` is 0-1 (array index), NOT servo ID; `all` broadcasts to both motors
+- Force setpoint changes apply immediately (doesn't require `start` to take effect)
+- PID tunings are RAM-only; flash with tuned values after testing
+- Status output format: `M0: Force= X.XXX / Y.YYY N | Pos=  XXXXX | Speed=   XXXX | RUN/STOP`
 
-## Hardware Integration
-- **Force Sensors**: HX711 (pins 12-15 on actuator 0; 14-15 on actuator 1) OR ANU78025 (I2C 0x2A on multiplexer)
-- **Distance Sensors**: VL6180X on TCA9548A multiplexer (channel 0/1 per actuator)
-- **Servo Comms**: Pins 16/17 @ 1Mbps (Serial2); expects servo driver responding to position/speed commands
+**Examples:**
+```
+set 0 24.5          # Motor 0: setpoint = 24.5 N (≈ 2.5 kg)
+start all           # Start both motors
+pid 1 350 0.8 45    # Motor 1: Kp=350, Ki=0.8, Kd=45 (tuning)
+stop all            # Emergency stop both
+```
 
 ## Development Patterns
 
 **Sensor Abstraction** - `ForceSensor` base class:
-- Both HX711 and ANU78025 inherit from abstract `ForceSensor` (see [src/ForceSensor.h](src/ForceSensor.h))
+- Both HX711 and NAU7802 inherit from abstract `ForceSensor` (see [src/ForceSensor.h](src/ForceSensor.h))
 - Unified interface: `update()`, `getForce()`, `getWeight()`, `isReady()`, `tare()`, `setCalibration()`
 - Enables polymorphic arrays: `ForceSensor* sensors[2] = {new ForceSensorHX711(...), new ForceSensorAnu78025(...)}`
-- Both implementations use identical filtering (moving-window average) and unit conventions (kg, N)
+- Both implementations use identical filtering (10-sample moving-window average) and unit conventions (kg → N)
+- Production build includes BOTH sensor implementations; choose which motor uses which at runtime
 
-**Non-blocking Architecture**: All sensors use `update()` calls in main loop; state returned via getter methods (`getForce()`, `getDistance()`)
+**Non-blocking Architecture**:
+- All sensors use `update()` calls in main loop; state returned via getter methods
+- Motor polling via `getPosition()`, `getSpeed()` (no blocking I/O)
+- Serial read is the only blocking operation (uses `readStringUntil('\n')`)
 
-**Sensor Data Flow**:
-1. `sensor->update()` - Non-blocking poll; if data available, read raw → compute mass → apply filter
-2. `sensor->getWeight()` - Returns filtered mass in kg (moving-window average, 10 samples)
-3. `sensor->getForce()` - Returns F = mass_kg × 9.81 (in Newtons)
-4. Filtering ensures stable setpoint and PID convergence
+**PID with Anti-windup** ([src/PidController.h](src/PidController.h)):
+- Integral term clamped; output limited to `[-maxSpeed, +maxSpeed]`
+- Anti-windup engaged on initialization to prevent integrator saturation
 
-**PID with Anti-windup** (`PidController::update()`):
-- Integral clamped to prevent accumulation; output range limited; anti-windup on initialization
-
-**Modular Test Builds** (`platformio.ini`):
-- `test_hx711`, `test_anu78025`, `test_vl6180x`, `test_motor`, `test_config` use `build_src_filter` for isolated testing
-- `test_one_motor_force_control`: Single force control loop (Motor ID 2 + NAU78025) for tuning
+**MotorDriver Communications**:
+- Uses SC Servo serial protocol @ 1Mbps (ServoSerial library)
+- Position is 0-4095 (wheel rotation) or 0-1023 (servo mode)
+- Commands: `setSpeed()`, `setPosition()`, `getPosition()`, `getSpeed()`, `stop()`
+- Mode switching: `setMode(MODE_WHEEL)` for force control, `MODE_SERVO_POSITION` for position hold
 
 ## Build & Debug Workflow
 
@@ -113,17 +104,103 @@ M1: Force=1.456/0.000 kg | Pos= 5678 | Speed=    0 | STOP
 | Upload & monitor | `pio run -e production -t upload && pio device monitor` |
 | Test single motor+sensor | `pio run -e test_one_motor_force_control -t upload` |
 | Test HX711 sensor | `pio run -e test_hx711 -t upload` |
-| Test ANU78025 sensor | `pio run -e test_anu78025 -t upload` |
+| Test NAU7802 sensor | `pio run -e test_anu78025 -t upload` |
+| System identification | `pio run -e one_motor_system_id -t upload` → `uv run system_identification.py` |
+| Launch Python GUI | `python3 main.py` (or `uv run main.py`) |
 
-**PlatformIO Environments**: 
-- `production`: Main firmware (dual motor, HX711 + ANU78025)
-- `test_one_motor_force_control`: Isolated Motor 2 + NAU78025 tuning
-- `test_hx711`, `test_anu78025`, etc.: Individual sensor testing
+**PlatformIO Environments** (from [platformio.ini](platformio.ini)): 
+- `production`: Main firmware (dual motor, HX711 + NAU7802) - **DEFAULT**
+- `one_motor_system_id`: Step response data collection @ 460800 baud (binary protocol)
+- `test_one_motor_force_control`: Isolated Motor 2 + NAU7802 tuning
+- `test_hx711`, `test_anu78025`, `test_vl6180x`, `test_motor`, `test_config`: Individual component testing
+
+**System Identification Workflow** (for PID tuning):
+1. Flash `one_motor_system_id` firmware (uses binary protocol @ 460800 baud)
+2. Run `system_identification.py` to collect step response data
+3. Script applies step input, records force/position, analyzes response
+4. Exports data as Polars DataFrame + CSV for analysis
+5. Results guide PID coefficient selection for ForceControlLoop
 
 ## Key Files by Function
-- `src/main.cpp`: System orchestration, loop cycle, command parsing
-- `src/ForceControlLoop.h/cpp`: Mode-switching logic, PID integration
-- `src/SafetyManager.h/cpp`: Limit checking, alarm state machine
-- `src/ConfigManager.h/cpp`: NVS persistence (PID, calibration)
-- `main.py`: GUI event handlers, serial reader thread</content>
+- [src/main.cpp](src/main.cpp): System orchestration, loop cycle, command parsing (lines 1-416)
+- [src/main_SystemIdentification.cpp](src/main_SystemIdentification.cpp): Binary telemetry for step response data collection
+- [src/ForceControlLoop.h/cpp](src/ForceControlLoop.h): Mode-switching logic, PID integration
+- [src/ForceSensor.h](src/ForceSensor.h): Abstract base class (polymorphic sensor interface)
+- [src/ForceSensorHX711.h/cpp](src/ForceSensorHX711.h): HX711 load cell implementation
+- [src/ForceSensorAnu78025.h/cpp](src/ForceSensorAnu78025.h): NAU7802 Qwiic scale implementation
+- [src/PidController.h/cpp](src/PidController.h): Anti-windup PID control
+- [src/MotorDriver.h/cpp](src/MotorDriver.h): Servo communication via Serial2
+- [src/SafetyManager.h/cpp](src/SafetyManager.h): Limit checking, alarm state machine (used in test builds)
+- [src/ConfigManager.h/cpp](src/ConfigManager.h): NVS persistence (not used in production main.cpp)
+- [main.py](main.py): CustomTkinter GUI for command dispatch + real-time status display
+- [system_identification.py](system_identification.py): Step response data collector with binary protocol parsing
+- [step_response_automation.py](step_response_automation.py): Parametric test suite framework (TestSuite, TestPoint, StepResponseAutomation runner)
+
+## Python Development (main.py, system_identification.py & step_response_automation.py)
+
+**Dependencies** (managed via `uv` + `pyproject.toml`):
+- `pyserial>=3.5` - Serial communication with ESP32
+- `customtkinter>=5.0` - Modern GUI framework
+- `polars>=1.38.1` - DataFrame operations (system ID analysis)
+- `matplotlib>=3.10.8` - Plotting step response data
+
+**main.py - CustomTkinter GUI**:
+- `SerialReaderThread`: Non-blocking serial read in separate thread
+- `CommandQueue`: Thread-safe command dispatch (rate limited: 1 cmd per 50ms)
+- UI: Force sliders (0-50N), start/stop buttons, emergency stop, real-time status display
+- Status parsing from firmware (M0/M1 format): Force (actual/setpoint), position, speed, run state
+- Launch: `python3 main.py` or `uv run main.py`
+
+**system_identification.py - Binary Protocol Parser**:
+- Connects @ 460800 baud to `one_motor_system_id` firmware
+- Syncs to header `0xAA 0x55`, reads packed status structs (12 bytes each)
+- Applies step inputs via serial commands (e.g., `step 500 2000` = speed 500 for 2000ms)
+- Exports response data as Polars DataFrame + CSV for PID tuning analysis
+
+**step_response_automation.py - Parametric Test Framework** (NEW):
+- `StepResponseAutomation` class orchestrates multi-test campaigns with automated reset between runs
+- Helper functions: `create_speed_sweep()`, `create_force_sweep()`, `create_parametric_grid()` for test suite generation
+- `TestSuite` & `TestPoint` dataclasses define test configurations
+- Reads binary protocol @ 460800 baud; generates Parquet files + PNG plots for each test
+- Key workflow: `automation.connect()` → `automation.run_test_suite(suite)` → auto-saves results with timestamps
+- Automatic `reset_to_zero()` between tests monitors cable length until < 1mm (max 30s timeout)
+- Example usage in `__main__`: 15-point speed sweep (100-1500) with 100s duration + 10N max force
+
+**Key Features**:
+- Emergency stop broadcasts `stop all` command
+- Real-time feedback panel shows all ESP32 responses + sent commands
+- Thread-safe with proper signal handling
+
+## Common Pitfalls & Conventions
+
+**Index/ID Confusion (frequent bug source):**
+- CLI & internal code use **array indices** (0-1) for motor selection
+- ServoSerial protocol uses **Servo IDs** (1-2) in packet headers
+- When adding new commands, always validate: which context am I in?
+- Example: `set 0 25.0` = Motor at array index 0 = Servo ID 1
+
+**Calibration Workflow:**
+- All sensor calibration is **compile-time only** (no NVS runtime configuration in production)
+- To change `FORCE_OFFSET_0` or `FORCE_SCALE_0`, edit `main.cpp` lines 16-24, rebuild, and flash
+- Never assume ConfigManager or NVS persistence; production main.cpp doesn't use it
+
+**Force Setpoint Semantics:**
+- `set <id> <N>` updates `forceSetpoint[id]` and takes immediate effect in next control loop iteration
+- Motor doesn't need to be running (`isRunning[id] == true`) for setpoint to apply
+- `start`/`stop` commands only control whether `controlLoops[i]->update()` executes
+
+**Thread Safety in main.py:**
+- Use `CommandQueue` for all serial commands; never call `serial_port.write()` directly
+- `SerialReaderThread` runs in separate thread; all queue operations are thread-safe
+- GUI updates must happen in main thread; use queue callbacks if needed
+
+**Motor Mode Semantics:**
+- `MODE_WHEEL`: Continuous rotation for force control (via PID speed regulation)
+- `MODE_SERVO_POSITION`: Fixed position hold (not typically used in force control)
+- `setMode()` only affects motor driver behavior; doesn't affect `ForceControlLoop` enum
+
+**Test Environment Selection:**
+- Use `build_src_filter` to isolate components; don't manually comment out code
+- `test_*` environments are mutually exclusive (each has its own main)
+- System identification environment uses different serial protocol (binary @ 460800 baud)</content>
 <parameter name="filePath">/home/student/Documents/PlatformIO/Projects/Spirob_aktuation/.github/copilot-instructions.md

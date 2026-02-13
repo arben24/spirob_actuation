@@ -47,13 +47,18 @@ void ForceControlLoop::setMaxSpeed(float max) {
     pid.setOutputLimits(-max, max);
 }
 
-void ForceControlLoop::update(float dt) {
+void ForceControlLoop::setSampleTime(float sampleTime) {
+    this->sampleTime = sampleTime;
+    pid.setSampleTime(sampleTime);
+}
+
+float ForceControlLoop::update() {
     if (mode == MODE_PID_FORCE && forceSensor && forceSensor->isReady()) {
         float force = forceSensor->getForce();
-        float output = pid.update(force, dt);
-        Serial.printf("PID Update: Setpoint=%.3f N, Measured=%.3f N, Output=%.1f\n", forceSetpoint, force, output);
-        motorDriver->setSpeed((int16_t)output);
+        Output = pid.update(force);
+        //Serial.printf("PID Update: Setpoint=%.3f N, Measured=%.3f N, Output=%.1f\n", forceSetpoint, force, Output);
     }
+    return Output;
 }
 
 float ForceControlLoop::getForce() {

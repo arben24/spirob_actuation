@@ -25,6 +25,8 @@ private:
     float speedSetpoint;
     float forceSetpoint;
     float maxSpeed;
+    float sampleTime;
+    float Output;
 
 public:
     ForceControlLoop(MotorDriver* md, ForceSensor* fs);
@@ -34,7 +36,8 @@ public:
     void setForceSetpoint(float sp);
     void setPidTunings(float kp, float ki, float kd);
     void setMaxSpeed(float max);
-    void update(float dt);
+    void setSampleTime(float sampleTime);
+    float update();
     float getForce();
 };
 

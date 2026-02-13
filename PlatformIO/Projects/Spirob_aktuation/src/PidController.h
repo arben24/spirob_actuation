@@ -9,15 +9,20 @@ private:
     float setpoint;
     float integral;
     float prevError;
-    float lastTime;
+    unsigned long lastTime;
     float outMin, outMax;
+    float sampleTime;
 
 public:
-    PidController(float kp = 10.0, float ki = 0.0, float kd = 0.0, float outMin = -1000.0, float outMax = 1000.0);
+    PidController(float kp = 10.0, float ki = 0.0, float kd = 0.0, float outMin = -1000.0, float outMax = 1000.0, float sampleTime = 100.0);
     void setTunings(float kp, float ki, float kd);
+    float getKp() { return Kp; }
+    float getKi() { return Ki; }
+    float getKd() { return Kd; }
     void setOutputLimits(float min, float max);
     void setSetpoint(float sp);
-    float update(float measurement, float now);
+    void setSampleTime(float dt);
+    float update(float measurement);
     void reset();
 };
 

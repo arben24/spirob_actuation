@@ -21,7 +21,7 @@ public:
      * @param i2cAddress I2C address of NAU7802 (typically 0x2A)
      * @param multiplexerChannel TCA9548A channel for this sensor
      */
-    ForceSensorAnu78025(uint8_t i2cAddress = 0x2A, uint8_t multiplexerChannel = 0);
+    ForceSensorAnu78025(uint8_t i2cAddress = 0x2A, uint8_t multiplexerChannel = 0, uint8_t sampleRate = NAU7802_SPS_80);
 
     // === ForceSensor Interface Implementation ===
     bool begin() override;
@@ -43,6 +43,7 @@ private:
     NAU7802 scale;
     uint8_t i2cAddress;
     uint8_t multiplexerChannel;
+    uint8_t sampleRate;
 
     // Calibration data
     float scaleFactor;
@@ -53,7 +54,7 @@ private:
     long currentRaw;
 
     // Filter: moving-window averaging
-    static const uint8_t filterSize = 10;
+    static const uint8_t filterSize = 1;
     float forceBuffer[filterSize];
     uint8_t bufferIndex;
     float filteredWeight; // in kg

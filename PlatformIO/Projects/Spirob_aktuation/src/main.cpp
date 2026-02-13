@@ -63,6 +63,7 @@ ForceControlLoop* controlLoops[NUM_ACTUATORS];
 // ============================================================================
 
 bool isRunning[NUM_ACTUATORS] = {false, false};
+bool fast_print = false;
 float forceSetpoint[NUM_ACTUATORS] = {0.0f, 0.0f};
 unsigned long lastStatusPrint = 0;
 const unsigned long STATUS_INTERVAL = 1000;  // 10Hz output
@@ -114,6 +115,7 @@ void setup() {
     controlLoops[0]->setForceSetpoint(0.0f);
     controlLoops[0]->setMaxSpeed(DEFAULT_MAX_SPEED);
     controlLoops[0]->setPidTunings(DEFAULT_KP, DEFAULT_KI, DEFAULT_KD);
+    controlLoops[0]->setSampleTime(100.0f);  // 100 ms sample time
     Serial.println(" OK");
 
     // === Initialize Motor 1 (ANU78025) ===
@@ -151,6 +153,7 @@ void setup() {
     controlLoops[1]->setForceSetpoint(0.0f);
     controlLoops[1]->setMaxSpeed(DEFAULT_MAX_SPEED);
     controlLoops[1]->setPidTunings(DEFAULT_KP, DEFAULT_KI, DEFAULT_KD);
+    controlLoops[1]->setSampleTime(100.0f);  // 100 ms sample time
     Serial.println(" OK");
 
     Serial.println("\n=== System Ready ===");
@@ -167,7 +170,7 @@ void printStatus() {
         int motorPos = motors[i]->getPosition();
         int motorSpeed = motors[i]->getSpeed();
         
-        Serial.printf("M%d: Force=%.3f/%.3f N | Pos=%5d | Speed=%5d | %s",
+        Serial.printf(" M%d: Force= %.3f / %.3f N | Pos= %5d | Speed= %5d | %s",
             i, forceActual, forceSetpoint[i], motorPos, motorSpeed,
             isRunning[i] ? "RUN" : "STOP");
     }
@@ -180,7 +183,7 @@ void printHelp() {
     Serial.println("start <id>               - Start regulation (0-1, or 'all')");
     Serial.println("stop <id>                - Stop regulation (0-1, or 'all')");
     Serial.println("pid <id> <kp> <ki> <kd> - Tune PID");
-    Serial.println("tare <id>                - Tare sensor (0-1, or 'all')");
+    //Serial.println("tare <id>                - Tare sensor (0-1, or 'all')");
     Serial.println("status                   - Print status");
     Serial.println("help                     - Show this help");
     Serial.println();
@@ -322,22 +325,38 @@ void processCommand(String cmd) {
         }
     }
 
-    // === tare <id> - Tare sensor ===
-    else if (token == "tare") {
+    else if(token == "sampletime") {
+        int firstSpace = args.indexOf(' ');
+        if (firstSpace == -1) {
+            Serial.println("Error: sampletime <id> <ms>");
+            return;
+        }
+        String idStr = args.substring(0, firstSpace);
+        float newSampleTime = args.substring(firstSpace + 1).toFloat();
+        
         int id;
-        if (!parseMotorId(args, id)) return;
+        if (!parseMotorId(idStr, id)) return;
 
         if (id == -1) {
             for (int i = 0; i < NUM_ACTUATORS; i++) {
-                sensors[i]->tare();
+                controlLoops[i]->setSampleTime(newSampleTime);
             }
-            Serial.println("All sensors: tared");
+            //Serial.print("All motors: sample time = ");
+            //Serial.print(newSampleTime, 3);
+            //Serial.println(" ms");
         } else {
-            sensors[id]->tare();
-            Serial.print("Motor ");
-            Serial.print(id);
-            Serial.println(": sensor tared");
+            controlLoops[id]->setSampleTime(newSampleTime);
+            //Serial.print("Motor ");
+            //Serial.print(id);
+            //Serial.print(": sample time = ");
+            //Serial.print(newSampleTime, 3);
+            //Serial.println(" ms");
         }
+    }
+
+    else if (token == "fast_print") {
+        fast_print = true;
+        Serial.println("Fast status printing enabled");
     }
 
     // === status - Print status ===
@@ -362,27 +381,17 @@ void processCommand(String cmd) {
 // ============================================================================
 
 void loop() {
-    unsigned long now = millis();
+    unsigned long now = micros();
 
     // --- 1. Update all sensors (non-blocking) ---
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         sensors[i]->update();
     }
-
-    // --- 2. Update control loops (if running) ---
-    static unsigned long lastLoopTime = 0;
-    if (lastLoopTime == 0) lastLoopTime = now;
-    
-    float dt = (now - lastLoopTime) / 1000.0f;
-    lastLoopTime = now;
-    
-    // Clamp dt to reasonable range
-    if (dt > 0.1f) dt = 0.01f;
-    if (dt < 0.001f) dt = 0.001f;
     
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         if (isRunning[i]) {
-            controlLoops[i]->update(dt);
+            float output = controlLoops[i]->update();
+            motors[i]->setSpeed((int16_t)output);
         }
     }
 
@@ -393,10 +402,14 @@ void loop() {
     }
 
     // --- 4. Status output (10Hz) ---
-    if (now - lastStatusPrint >= STATUS_INTERVAL) {
+    if ((now - lastStatusPrint >= STATUS_INTERVAL)&&(fast_print==false)) {
+        //printStatus();
+        lastStatusPrint = now;
+    }
+    if (fast_print==true){
         printStatus();
         lastStatusPrint = now;
     }
 
-    delay(5);  // Small delay to prevent overwhelming the loop
+    //Serial.println(micros() - now); // print loop time for debugging
 }

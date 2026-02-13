@@ -2,15 +2,21 @@
 
 #define TCA9548A_ADDR 0x70
 
-ForceSensorAnu78025::ForceSensorAnu78025(uint8_t i2cAddress, uint8_t multiplexerChannel)
+ForceSensorAnu78025::ForceSensorAnu78025(uint8_t i2cAddress, uint8_t multiplexerChannel, uint8_t sampleRate)
     : i2cAddress(i2cAddress), multiplexerChannel(multiplexerChannel), 
       scaleFactor(1.0), offset(0), ready(false), currentRaw(0), 
-      filteredWeight(0.0), bufferIndex(0) 
+      filteredWeight(0.0), bufferIndex(0), sampleRate(sampleRate)
 {
     for (uint8_t i = 0; i < filterSize; i++) {
         forceBuffer[i] = 0.0;
     }
 }
+
+    /*  NAU7802_SPS_320 = 0b111 = 7,
+  NAU7802_SPS_80 = 0b011 = 3,
+  NAU7802_SPS_40 = 0b010 = 2,
+  NAU7802_SPS_20 = 0b001 = 1,
+  NAU7802_SPS_10 = 0b000 = 0;*/
 
 void ForceSensorAnu78025::selectChannel(uint8_t channel) {
     Wire.beginTransmission(TCA9548A_ADDR);
@@ -26,7 +32,7 @@ bool ForceSensorAnu78025::begin() {
     }
 
     scale.setGain(NAU7802_GAIN_128);
-    scale.setSampleRate(NAU7802_SPS_80);
+    scale.setSampleRate(sampleRate);
     
     // Calibrate AFE (Analog Front End)
     scale.calibrateAFE();

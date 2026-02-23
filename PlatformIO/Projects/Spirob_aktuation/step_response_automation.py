@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 @dataclass
 class TestPoint:
     """Single test configuration point."""
+    motor: int                  # Motor index (0 or 1)
     speed: int                  # Motor speed command
     duration_ms: int            # Step duration
     max_force_N: float          # Force limit
@@ -34,7 +35,7 @@ class TestPoint:
     
     def __str__(self) -> str:
         desc = f" ({self.description})" if self.description else ""
-        return f"Speed={self.speed:4d} | Duration={self.duration_ms:4d}ms | MaxForce={self.max_force_N:6.1f}N{desc}"
+        return f"Motor={self.motor} | Speed={self.speed:4d} | Duration={self.duration_ms:4d}ms | MaxForce={self.max_force_N:6.1f}N{desc}"
 
 @dataclass
 class TestSuite:
@@ -137,11 +138,13 @@ class SerialConnection:
 
 @dataclass
 class SensorData:
-    """Single sensor reading."""
+    """Single sensor reading (both motors)."""
     timestamp_s: float
     timestamp_us: int
-    force_N: float
-    cable_length_mm: float
+    force0_N: float
+    force1_N: float
+    rope0_mm: float
+    rope1_mm: float
 
 class DataBuffer:
     """Manages sensor data for a single test."""
@@ -169,8 +172,10 @@ class DataBuffer:
         return pl.DataFrame({
             "timestamp_s": [d.timestamp_s for d in self.data],
             "timestamp_us": [d.timestamp_us for d in self.data],
-            "force_N": [d.force_N for d in self.data],
-            "cable_length_mm": [d.cable_length_mm for d in self.data]
+            "force0_N": [d.force0_N for d in self.data],
+            "force1_N": [d.force1_N for d in self.data],
+            "rope0_mm": [d.rope0_mm for d in self.data],
+            "rope1_mm": [d.rope1_mm for d in self.data],
         })
     
     def save_parquet(self, filepath: Path) -> None:
@@ -204,8 +209,8 @@ class StepResponseAutomation:
         # Protocol config
         self.status_header = b'\xaa\x55'
         self.step_end_header = b'\xbb\x66'
-        self.struct_format = '<I f f'
-        self.struct_size = 12
+        self.struct_format = '<I ff ff'
+        self.struct_size = 20
     
     def connect(self) -> bool:
         """Establish serial connection."""
@@ -231,19 +236,24 @@ class StepResponseAutomation:
                 data = self.serial.read_exact(self.struct_size)
                 if data:
                     try:
-                        timestamp_us, force_N, cable_length_mm = struct.unpack(self.struct_format, data)
+                        timestamp_us, f0, f1, r0, r1 = struct.unpack(self.struct_format, data)
                         sample = SensorData(
                             timestamp_s=time.time(),
                             timestamp_us=timestamp_us,
-                            force_N=force_N,
-                            cable_length_mm=cable_length_mm
+                            force0_N=f0,
+                            force1_N=f1,
+                            rope0_mm=r0,
+                            rope1_mm=r1,
                         )
                         self.buffer.append(sample)
                     except struct.error:
                         pass
             
             elif header_type == 'step_end':
-                self.logger.warning("🎯 STEP END received")
+                # Read motor index byte
+                motor_byte = self.serial.read_exact(1)
+                motor_idx = motor_byte[0] if motor_byte else -1
+                self.logger.warning(f"🎯 STEP END received (motor {motor_idx})")
                 return True
         
         self.logger.warning(f"⏱️ Timeout waiting for step end ({timeout_s}s)")
@@ -262,8 +272,8 @@ class StepResponseAutomation:
         self.serial.clear_input_buffer()
         
         # Send step command
-        self.serial.write_command(f"step {test_point.speed} {test_point.duration_ms}")
-        self.logger.info(f"Sent: step {test_point.speed} {test_point.duration_ms}")
+        self.serial.write_command(f"step {test_point.motor} {test_point.speed} {test_point.duration_ms}")
+        self.logger.info(f"Sent: step {test_point.motor} {test_point.speed} {test_point.duration_ms}")
         
         # Wait for step to complete
         success = self.wait_for_step_end(timeout_s=test_point.duration_ms / 1000.0 + 3.0)
@@ -276,21 +286,21 @@ class StepResponseAutomation:
         
         return success
     
-    def reset_to_zero(self) -> bool:
-        """Reset rope length to 0 using 'r' command. Monitors until cable_length_mm < 1mm."""
-        self.logger.info("↩️ Resetting to rope length 0...")
+    def reset_to_zero(self, motor: int = 0) -> bool:
+        """Reset rope length to 0 using 'r <motor>' command. Monitors until rope < 1mm."""
+        self.logger.info(f"↩️ Resetting motor {motor} to rope length 0...")
         
         # Clear buffer first
         self.serial.clear_input_buffer()
         time.sleep(0.1)
         
         # Send reset command
-        self.serial.write_command("r")
+        self.serial.write_command(f"r {motor}")
         
-        # Wait for reset to complete, monitoring cable length
-        timeout_s = 30.0  # Increased timeout for long cable lengths
+        # Wait for reset to complete, monitoring rope length
+        timeout_s = 30.0
         start_time = time.time()
-        last_cable_length = None
+        last_rope_length = None
         samples_checked = 0
         
         while time.time() - start_time < timeout_s:
@@ -304,24 +314,26 @@ class StepResponseAutomation:
                 data = self.serial.read_exact(self.struct_size)
                 if data:
                     try:
-                        timestamp_us, force_N, cable_length_mm = struct.unpack(self.struct_format, data)
-                        last_cable_length = cable_length_mm
+                        ts, f0, f1, r0, r1 = struct.unpack(self.struct_format, data)
+                        rope_length = r0 if motor == 0 else r1
+                        last_rope_length = rope_length
                         samples_checked += 1
                         
-                        # Log progress every 50 samples (~100ms at 600Hz)
                         if samples_checked % 50 == 0:
-                            self.logger.info(f"   Resetting... Cable length: {cable_length_mm:.3f}mm")
+                            self.logger.info(f"   Resetting motor {motor}... Rope: {rope_length:.3f}mm")
                         
-                        # Check if reset is complete
-                        if abs(cable_length_mm) < 1.0:
-                            self.logger.info(f"✅ Reset complete | Cable length: {cable_length_mm:.3f}mm | Samples: {samples_checked}")
+                        if abs(rope_length) < 1.0:
+                            self.logger.info(f"✅ Reset complete | Motor {motor} rope: {rope_length:.3f}mm | Samples: {samples_checked}")
                             return True
                     except struct.error:
                         pass
+            
+            elif header_type == 'step_end':
+                self.serial.read_exact(1)  # consume motor index byte
         
         # Timeout fallback
-        cable_str = f"{last_cable_length:.3f}mm" if last_cable_length is not None else "unknown"
-        self.logger.warning(f"⏱️ Reset timeout ({timeout_s}s) | Last cable length: {cable_str} | Samples: {samples_checked}")
+        rope_str = f"{last_rope_length:.3f}mm" if last_rope_length is not None else "unknown"
+        self.logger.warning(f"⏱️ Reset timeout ({timeout_s}s) | Motor {motor} rope: {rope_str} | Samples: {samples_checked}")
         return False
     
     def save_test_result(self, test_index: int, test_point: TestPoint) -> Path:
@@ -334,7 +346,7 @@ class StepResponseAutomation:
         return filepath
     
     def generate_plots(self, test_index: int, test_point: TestPoint, timestamp: str) -> Path:
-        """Generate 3-panel plot (Force, Cable Length, Cable Velocity) and save as PNG."""
+        """Generate 3-panel plot (Force, Rope Length, Rope Velocity) for active motor."""
         if len(self.buffer) < 2:
             self.logger.warning("Cannot generate plots: insufficient data points")
             return None
@@ -343,24 +355,28 @@ class StepResponseAutomation:
             df = self.buffer.to_polars_df()
             time_s = df["timestamp_s"].to_numpy() - df["timestamp_s"][0]
             
+            m = test_point.motor
+            force_col = f"force{m}_N"
+            rope_col  = f"rope{m}_mm"
+            
             fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
             
             # Force plot
-            axes[0].plot(time_s, df["force_N"].to_numpy(), 'b-', linewidth=0.8)
+            axes[0].plot(time_s, df[force_col].to_numpy(), 'b-', linewidth=0.8)
             axes[0].set_ylabel("Force [N]", fontsize=11)
             axes[0].grid(True, alpha=0.3)
-            axes[0].set_title(f"Step Response Test #{test_index} | Speed={test_point.speed} | Duration={test_point.duration_ms}ms | MaxForce={test_point.max_force_N}N", 
+            axes[0].set_title(f"Step Response #{test_index} | Motor={m} Speed={test_point.speed} | Duration={test_point.duration_ms}ms | MaxForce={test_point.max_force_N}N", 
                              fontsize=12, fontweight='bold')
             
-            # Cable length plot
-            axes[1].plot(time_s, df["cable_length_mm"].to_numpy(), 'r-', linewidth=0.8)
-            axes[1].set_ylabel("Cable Length [mm]", fontsize=11)
+            # Rope length plot
+            axes[1].plot(time_s, df[rope_col].to_numpy(), 'r-', linewidth=0.8)
+            axes[1].set_ylabel("Rope Length [mm]", fontsize=11)
             axes[1].grid(True, alpha=0.3)
             
-            # Cable velocity plot (numerical gradient)
-            cable_velocity = np.gradient(df["cable_length_mm"].to_numpy()) / np.gradient(time_s)
-            axes[2].plot(time_s, cable_velocity, 'g-', linewidth=0.8)
-            axes[2].set_ylabel("Cable Velocity [mm/s]", fontsize=11)
+            # Rope velocity plot (numerical gradient)
+            rope_velocity = np.gradient(df[rope_col].to_numpy()) / np.gradient(time_s)
+            axes[2].plot(time_s, rope_velocity, 'g-', linewidth=0.8)
+            axes[2].set_ylabel("Rope Velocity [mm/s]", fontsize=11)
             axes[2].set_xlabel("Time [s]", fontsize=11)
             axes[2].grid(True, alpha=0.3)
             
@@ -425,7 +441,7 @@ class StepResponseAutomation:
             
             # Reset for next test (except last)
             if idx <= len(suite.test_points):
-                self.reset_to_zero()
+                self.reset_to_zero(motor=test_point.motor)
                 time.sleep(2.0)  # Settle time before next test
                 self.serial.clear_input_buffer()
         
@@ -453,11 +469,13 @@ def create_speed_sweep(
     speeds: List[int],
     duration_ms: int,
     max_force_N: float,
+    motor: int = 0,
     description: str = ""
 ) -> TestSuite:
     """Create test suite with varying speeds."""
     test_points = [
         TestPoint(
+            motor=motor,
             speed=s,
             duration_ms=duration_ms,
             max_force_N=max_force_N,
@@ -466,7 +484,7 @@ def create_speed_sweep(
         for s in speeds
     ]
     return TestSuite(
-        name=f"Speed Sweep ({min(speeds)}-{max(speeds)})",
+        name=f"Speed Sweep ({min(speeds)}-{max(speeds)}) Motor {motor}",
         test_points=test_points
     )
 
@@ -474,11 +492,13 @@ def create_force_sweep(
     speed: int,
     duration_ms: int,
     max_forces: List[float],
+    motor: int = 0,
     description: str = ""
 ) -> TestSuite:
     """Create test suite with varying force limits."""
     test_points = [
         TestPoint(
+            motor=motor,
             speed=speed,
             duration_ms=duration_ms,
             max_force_N=f,
@@ -487,18 +507,20 @@ def create_force_sweep(
         for f in max_forces
     ]
     return TestSuite(
-        name=f"Force Sweep ({min(max_forces)}-{max(max_forces)}N)",
+        name=f"Force Sweep ({min(max_forces)}-{max(max_forces)}N) Motor {motor}",
         test_points=test_points
     )
 
 def create_parametric_grid(
     speeds: List[int],
     max_forces: List[float],
-    duration_ms: int
+    duration_ms: int,
+    motor: int = 0
 ) -> TestSuite:
     """Create Cartesian product of speeds × forces."""
     test_points = [
         TestPoint(
+            motor=motor,
             speed=s,
             duration_ms=duration_ms,
             max_force_N=f,
@@ -508,7 +530,7 @@ def create_parametric_grid(
         for f in max_forces
     ]
     return TestSuite(
-        name=f"Parametric Grid {len(speeds)}×{len(max_forces)}",
+        name=f"Parametric Grid {len(speeds)}×{len(max_forces)} Motor {motor}",
         test_points=test_points
     )
 

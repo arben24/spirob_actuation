@@ -32,9 +32,10 @@ class SpiRobConfig:
     baudrate: int = 460800
     timeout: float = 0.001
     status_header: bytes = b'\xaa\x55'          # Normal status packet
-    step_end_header: bytes = b'\xbb\x66'       # Step-end signal (2 bytes)
-    struct_format: str = '<I f f'  # uint32, float32, float32
-    struct_size: int = 12
+    step_end_header: bytes = b'\xbb\x66'       # Step-end signal (2 bytes + 1 motor idx)
+    struct_format: str = '<I ff ff'  # uint32, 2×float32(force), 2×float32(rope)
+    struct_size: int = 20            # 4 + 4*2 + 4*2 = 20 bytes
+    num_motors: int = 2
     sync_timeout: float = 0.1
     output_dir: Path = field(default_factory=lambda: Path.cwd())
 
@@ -44,15 +45,18 @@ class SpiRobConfig:
 
 @dataclass
 class SensorData:
-    """Single sensor reading from ESP32."""
+    """Single sensor reading from ESP32 (both motors)."""
     timestamp_s: float          # System time (Python)
     timestamp_us: int           # MCU microseconds
-    force_N: float              # Tendon force [Newtons]
-    cable_length_mm: float      # Cable length [millimeters]
+    force0_N: float             # Tendon force motor 0 [N]
+    force1_N: float             # Tendon force motor 1 [N]
+    rope0_mm: float             # Rope length motor 0 [mm]
+    rope1_mm: float             # Rope length motor 1 [mm]
 
 @dataclass
 class StepConfig:
     """Step response test configuration."""
+    motor: int              # Motor index (0 or 1)
     speed: int              # Motor speed command
     duration_ms: int        # Step duration in milliseconds
     
@@ -64,6 +68,7 @@ class StepConfig:
 @dataclass
 class ExperimentMeta:
     """Metadata for step response experiment."""
+    motor: int
     step_speed: int
     duration_ms: int
     max_force: Optional[float]      # From 'f' command
@@ -208,8 +213,10 @@ class DataBuffer:
         return pl.DataFrame({
             "timestamp_s": [d.timestamp_s for d in self.data],
             "timestamp_us": [d.timestamp_us for d in self.data],
-            "force_N": [d.force_N for d in self.data],
-            "cable_length_mm": [d.cable_length_mm for d in self.data]
+            "force0_N": [d.force0_N for d in self.data],
+            "force1_N": [d.force1_N for d in self.data],
+            "rope0_mm": [d.rope0_mm for d in self.data],
+            "rope1_mm": [d.rope1_mm for d in self.data],
         })
     
     def save_parquet(self, filepath: Path) -> None:
@@ -221,6 +228,7 @@ class DataBuffer:
     def save_metadata(self, filepath: Path, meta: ExperimentMeta) -> None:
         """Save experiment metadata as separate Parquet file."""
         meta_df = pl.DataFrame([{
+            "motor": meta.motor,
             "step_speed": meta.step_speed,
             "duration_ms": meta.duration_ms,
             "max_force": meta.max_force,
@@ -250,7 +258,7 @@ class LiveMonitor:
     
     def print_sample(self, sample: SensorData) -> None:
         """Print live data to console (overwrite line)."""
-        print(f"\r📡 {sample.timestamp_us:10d}us | {sample.force_N:7.3f}N | {sample.cable_length_mm:7.3f}mm", 
+        print(f"\r📡 {sample.timestamp_us:10d}us | M0: {sample.force0_N:6.2f}N {sample.rope0_mm:7.1f}mm | M1: {sample.force1_N:6.2f}N {sample.rope1_mm:7.1f}mm", 
               end='', flush=True)
 
 # ============================================================================
@@ -267,20 +275,20 @@ class StepController:
     
     @staticmethod
     def parse_step_command(cmd: str) -> Optional[StepConfig]:
-        """Parse 'step <speed> <ms>' command into StepConfig."""
+        """Parse 'step <motor> <speed> <ms>' command into StepConfig."""
         parts = cmd.split()
-        if len(parts) != 3 or parts[0] != 'step':
+        if len(parts) != 4 or parts[0] != 'step':
             return None
         try:
-            return StepConfig(speed=int(parts[1]), duration_ms=int(parts[2]))
+            return StepConfig(motor=int(parts[1]), speed=int(parts[2]), duration_ms=int(parts[3]))
         except ValueError:
             return None
     
     @staticmethod
-    def parse_force_command(cmd: str) -> Optional[float]:
-        """Parse 'f <max_force>' command."""
+    def parse_force_limit_command(cmd: str) -> Optional[float]:
+        """Parse 'fl <max_force>' command (force limit for step responses)."""
         parts = cmd.split()
-        if len(parts) != 2 or parts[0] != 'f':
+        if len(parts) != 2 or parts[0] != 'fl':
             return None
         try:
             return float(parts[1])
@@ -288,28 +296,40 @@ class StepController:
             return None
     
     def generate_plots(self, buffer: DataBuffer, step: StepConfig) -> Path:
-        """Create 3-panel plot (Force, Cable Length, Cable Velocity) and save."""
+        """Create 3-panel plot (Force, Rope Length, Rope Velocity) for active motor."""
         df = buffer.to_polars_df()
         time_s = df["timestamp_s"].to_numpy() - df["timestamp_s"][0]
         
+        m = step.motor  # Active motor index
+        other = 1 - m   # Other motor
+        
+        force_col   = f"force{m}_N"
+        rope_col    = f"rope{m}_mm"
+        force_other = f"force{other}_N"
+        rope_other  = f"rope{other}_mm"
+        
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         
-        # Force plot
-        axes[0].plot(time_s, df["force_N"].to_numpy(), 'b-', linewidth=0.8)
+        # Force plot (active motor solid, other motor dashed/light)
+        axes[0].plot(time_s, df[force_col].to_numpy(), 'b-', linewidth=0.8, label=f"Motor {m}")
+        axes[0].plot(time_s, df[force_other].to_numpy(), 'b--', linewidth=0.4, alpha=0.4, label=f"Motor {other}")
         axes[0].set_ylabel("Force [N]", fontsize=11)
+        axes[0].legend(loc='upper right', fontsize=9)
         axes[0].grid(True, alpha=0.3)
-        axes[0].set_title(f"SpiRob Step Response | Speed={step.speed} | Duration={step.duration_ms}ms", 
+        axes[0].set_title(f"SpiRob Step Response | Motor={m} Speed={step.speed} | Duration={step.duration_ms}ms", 
                          fontsize=12, fontweight='bold')
         
-        # Cable length plot
-        axes[1].plot(time_s, df["cable_length_mm"].to_numpy(), 'r-', linewidth=0.8)
-        axes[1].set_ylabel("Cable Length [mm]", fontsize=11)
+        # Rope length plot
+        axes[1].plot(time_s, df[rope_col].to_numpy(), 'r-', linewidth=0.8, label=f"Motor {m}")
+        axes[1].plot(time_s, df[rope_other].to_numpy(), 'r--', linewidth=0.4, alpha=0.4, label=f"Motor {other}")
+        axes[1].set_ylabel("Rope Length [mm]", fontsize=11)
+        axes[1].legend(loc='upper right', fontsize=9)
         axes[1].grid(True, alpha=0.3)
         
-        # Cable velocity plot (numerical gradient)
-        cable_velocity = np.gradient(df["cable_length_mm"].to_numpy()) / np.gradient(time_s)
-        axes[2].plot(time_s, cable_velocity, 'g-', linewidth=0.8)
-        axes[2].set_ylabel("Cable Velocity [mm/s]", fontsize=11)
+        # Rope velocity plot (numerical gradient of active motor)
+        rope_velocity = np.gradient(df[rope_col].to_numpy()) / np.gradient(time_s)
+        axes[2].plot(time_s, rope_velocity, 'g-', linewidth=0.8)
+        axes[2].set_ylabel("Rope Velocity [mm/s]", fontsize=11)
         axes[2].set_xlabel("Time [s]", fontsize=11)
         axes[2].grid(True, alpha=0.3)
         
@@ -353,7 +373,7 @@ class SpiRobRecorder:
     def connect(self) -> None:
         """Initialize serial connection."""
         self.serial.connect()
-        self.logger.info("🔌 Ready | 'step <speed> <ms>' to record | 'f <force>' to set limit | 'r' to return to 0 | 'q' to quit")
+        self.logger.info("🔌 Ready | 'step <m> <speed> <ms>' to record | 'fl <N>' force limit | 'f <m> <N>' force setpoint | 'start <m>' | 'q' to quit")
     
     def disconnect(self) -> None:
         """Cleanup resources."""
@@ -375,12 +395,14 @@ class SpiRobRecorder:
                 return
             
             try:
-                timestamp_us, force_N, cable_length_mm = struct.unpack(self.config.struct_format, data)
+                timestamp_us, force0_N, force1_N, rope0_mm, rope1_mm = struct.unpack(self.config.struct_format, data)
                 sample = SensorData(
                     timestamp_s=time.time(),
                     timestamp_us=timestamp_us,
-                    force_N=force_N,
-                    cable_length_mm=cable_length_mm
+                    force0_N=force0_N,
+                    force1_N=force1_N,
+                    rope0_mm=rope0_mm,
+                    rope1_mm=rope1_mm,
                 )
                 
                 # State-dependent handling
@@ -395,12 +417,15 @@ class SpiRobRecorder:
         
         # Step-end signal (accept during RECORDING or WAIT_END_SIGNAL)
         elif header_type == 'step_end':
+            # Read 1 extra byte: motor index
+            motor_byte = self.serial.read_exact(1)
+            motor_idx = motor_byte[0] if motor_byte else -1
             if self.state in [RecorderState.RECORDING, RecorderState.WAIT_END_SIGNAL]:
-                self.logger.warning("✅ STEP END detected - finishing recording")
+                self.logger.warning(f"\u2705 STEP END detected (motor {motor_idx}) - finishing recording")
                 self.end_reason = 'step_completed'
                 self._finish_recording()
             else:
-                self.logger.warning(f"⚠️ Unexpected step_end signal in state: {self.state} (ignoring)")
+                self.logger.warning(f"\u26a0\ufe0f Unexpected step_end signal (motor {motor_idx}) in state: {self.state} (ignoring)")
     
     def process_user_input(self) -> bool:
         """Handle user commands (non-blocking). Returns False to quit."""
@@ -413,10 +438,10 @@ class SpiRobRecorder:
         if cmd.lower() == 'q':
             return False
         
-        # Return to rope length 0 command
-        if cmd.lower() == 'r':
-            self.serial.write_command('r')
-            self.logger.info("→ r | Returning to rope length 0...")
+        # Return to rope length 0 command (forward as-is, e.g. 'r 0', 'r all')
+        if cmd.lower().startswith('r ') or cmd.lower() == 'r':
+            self.serial.write_command(cmd)
+            self.logger.info(f"→ {cmd} | Returning to rope length 0...")
             return True
         
         # Step command: step <speed> <ms>
@@ -425,12 +450,12 @@ class SpiRobRecorder:
             self._start_step_recording(step)
             return True
         
-        # Force limit command: f <max_force>
-        max_force = StepController.parse_force_command(cmd)
+        # Force limit command: fl <max_force>
+        max_force = StepController.parse_force_limit_command(cmd)
         if max_force is not None:
             self.max_force = max_force
             self.serial.write_command(cmd)
-            self.logger.info(f"→ {cmd} | Max force set to {max_force}N")
+            self.logger.info(f"→ {cmd} | Max force limit set to {max_force}N")
             return True
         
         # Forward other commands to ESP32
@@ -446,7 +471,7 @@ class SpiRobRecorder:
             return
         
         # Send command to ESP32
-        self.serial.write_command(f"step {step.speed} {step.duration_ms}")
+        self.serial.write_command(f"step {step.motor} {step.speed} {step.duration_ms}")
         
         # Prepare recording
         self.buffer.clear()
@@ -460,7 +485,7 @@ class SpiRobRecorder:
         self.state = RecorderState.RECORDING
         
         max_force_str = f" | MaxForce={self.max_force}N" if self.max_force else ""
-        self.logger.info(f"🎬 RECORDING | Speed={step.speed} | Duration={step.duration_ms}ms{max_force_str}")
+        self.logger.info(f"\U0001f3ac RECORDING | Motor={step.motor} | Speed={step.speed} | Duration={step.duration_ms}ms{max_force_str}")
     
     def update_state(self) -> None:
         """Check for state transitions."""
@@ -503,6 +528,7 @@ class SpiRobRecorder:
         step = self.controller.current_step
         if step:
             meta = ExperimentMeta(
+                motor=step.motor,
                 step_speed=step.speed,
                 duration_ms=step.duration_ms,
                 max_force=self.max_force,

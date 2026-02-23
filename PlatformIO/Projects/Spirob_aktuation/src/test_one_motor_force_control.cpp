@@ -8,11 +8,11 @@
 // HARDWARE CONFIGURATION (Static - adjust as needed)
 // ============================================================================
 
-#define MOTOR_ID             2          // Servo ID for this motor
+#define MOTOR_ID             1          // Servo ID for this motor
 #define MOTOR_RX_PIN         16         // Servo UART RX
 #define MOTOR_TX_PIN         17         // Servo UART TX
 #define FORCE_SENSOR_I2C_ADDR  0x2A     // NAU7802 I2C address
-#define FORCE_SENSOR_MUX_CH    2        // TCA9548A multiplexer channel for Motor 2
+#define FORCE_SENSOR_MUX_CH    0        // TCA9548A multiplexer channel for Motor 2
 
 // ============================================================================
 // CALIBRATION CONSTANTS (Calibrate and fill in these values)
@@ -20,8 +20,8 @@
 
 // Example calibration values - replace with YOUR calibrated values
 // Tare at zero load, then place known weight to get offset/scale
-#define FORCE_SENSOR_OFFSET  520000L    // Raw ADC value at zero load (tare)
-#define FORCE_SENSOR_SCALE   423.11273f // Raw counts per kg: (raw_loaded - offset) / mass_kg
+#define FORCE_SENSOR_OFFSET  153859L   // Raw ADC value at zero load (tare)
+#define FORCE_SENSOR_SCALE   105.13830 // Raw counts per kg: (raw_loaded - offset) / mass_kg
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -76,6 +76,8 @@ void setup() {
     }
     Serial.print(" OK (Position="); Serial.print(pos); Serial.println(")");
 
+    motor->setReverseDirection(true); // Set to true if motor moves in opposite direction
+
     // --- Initialize Force Sensor ---
     Serial.print("Initializing ForceSensorAnu78025 on Mux Channel ");
     Serial.print(FORCE_SENSOR_MUX_CH);
@@ -104,8 +106,9 @@ void setup() {
     Serial.print("Initializing ForceControlLoop...");
     controlLoop = new ForceControlLoop(motor, forceSensor);
     controlLoop->setMode(MODE_PID_FORCE);  // Force regulation mode
-    controlLoop->setForceSetpoint(0.0f);   // Start at zero force
+    controlLoop->setForceSetpoint(5.0f);   // Start at zero force
     controlLoop->setMaxSpeed(3000);        // Max motor speed
+    controlLoop->setSampleTime(200.0f);     // PID sample time in ms
     Serial.println(" OK");
 
     Serial.println("\n=== Commands ===");
@@ -245,7 +248,10 @@ void loop() {
         if (dt > 0.1f) dt = 0.01f;
         if (dt < 0.001f) dt = 0.001f;
         
-        controlLoop->update(dt);
+    
+        float output = controlLoop->update();
+        motor->setSpeed((int16_t)output);
+
     }
 
     // --- 3. Serial command processing ---

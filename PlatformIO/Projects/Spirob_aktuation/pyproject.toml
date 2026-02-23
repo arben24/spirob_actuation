@@ -10,4 +10,7 @@ dependencies = [
     "polars>=1.38.1",
     "matplotlib>=3.10.8",
     "scipy>=1.15.3",
+    "pyqt6>=6.10.2",
+    "pyqtgraph>=0.14.0",
+    "mujoco>=3.5.0",
 ]

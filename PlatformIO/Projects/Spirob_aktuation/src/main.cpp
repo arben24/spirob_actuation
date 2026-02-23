@@ -17,7 +17,7 @@ void printHelp();
 
 #define MOTOR_0_ID                1
 #define MOTOR_0_REVERSE_DIRECTION  true
-#define MOTOR_0_SENSOR_TYPE       FORCE_HX711
+#define MOTOR_0_SENSOR_TYPE       FORCE_ANU78025
 #define HX711_DATA_PIN_0          26
 #define HX711_CLOCK_PIN_0         27
 #define FORCE_OFFSET_0            270331L

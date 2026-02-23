@@ -12,6 +12,7 @@ private:
     unsigned long lastTime;
     float outMin, outMax;
     float sampleTime;
+    float lastOutput;
 
 public:
     PidController(float kp = 10.0, float ki = 0.0, float kd = 0.0, float outMin = -1000.0, float outMax = 1000.0, float sampleTime = 100.0);

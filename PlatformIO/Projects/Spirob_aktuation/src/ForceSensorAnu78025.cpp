@@ -81,7 +81,7 @@ float ForceSensorAnu78025::getWeight() {
 
 float ForceSensorAnu78025::getForce() {
     // F = m * g (mass in kg * 9.81 m/s²)
-    return (filteredWeight/1000) * 9.80665f;
+    return (filteredWeight/1000) * 9.81f;
 }
 
 bool ForceSensorAnu78025::isReady() {

@@ -1,6 +1,12 @@
+/*
+ * RobStride/CyberGear CAN motors (see MotorDriverRobStride.h) - same control
+ * mapping as env:production: motor stays in CTRL_MODE, force-PID output is a
+ * speed target tracked via the MIT frame's kd damping term.
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
-#include "MotorDriver.h"
+#include "MotorDriverRobStride.h"
 #include "ForceSensorAnu78025.h"
 #include "ForceControlLoop.h"
 #include "EndStopSwitch.h"
@@ -34,21 +40,33 @@
 #define ANU78025_I2C_ADDR         0x2A
 #define WINCH_DIAMETER_MM         44.0f
 #define NUM_ACTUATORS             2
-#define MOTOR_RX_PIN              16
-#define MOTOR_TX_PIN              17
-#define DEFAULT_MAX_SPEED         3000
-#define HOMING_SPEED              250
+
+// PID output / motor speed target, in centi-rad/s (see MotorDriverRobStride.h
+// unit convention: value/100.0f = rad/s). Bounds the force-PID's own authority;
+// the "v"/"step" commands below send whatever raw centi-rad/s the user asks
+// for, independent of this cap. Placeholder - not yet tuned on hardware.
+#define DEFAULT_MAX_SPEED         300
+// Slow, deliberate approach speed for homing - independent constant, not a
+// fraction of DEFAULT_MAX_SPEED. Placeholder - verify on hardware before trusting.
+#define HOMING_SPEED              30
+
+// RobStride MIT-frame gains, shared by both motors (placeholders, see main.cpp).
+#define MOTOR_HOLD_KP             10.0f
+#define MOTOR_HOLD_KD             1.0f
+#define MOTOR_SPEED_KD            1.0f
+#define MOTOR_TORQUE_LIMIT_NM     6.0f
+#define MOTOR_CURRENT_LIMIT_A     10.0f
 
 // ============================================================================
 // ROPE LENGTH CALCULATION (precomputed constants for efficiency)
 // ============================================================================
 
-// Precompute mm per step: circumference / 4096 steps
-constexpr float MM_PER_STEP = (3.14159265358979323846f * WINCH_DIAMETER_MM) / 4096.0f;
+// mm of rope per radian of drum rotation: arc length s = radius * angle
+constexpr float MM_PER_RAD = WINCH_DIAMETER_MM / 2.0f;
 
 // Per-motor state arrays
 volatile float totalRopeLength_mm[NUM_ACTUATORS] = {0.0f, 0.0f};
-volatile int   prevMotorPos[NUM_ACTUATORS]       = {0, 0};
+volatile float prevMotorPos_rad[NUM_ACTUATORS]    = {0.0f, 0.0f};
 const bool     reverseDirection[NUM_ACTUATORS]    = {MOTOR_0_REVERSE_DIRECTION, MOTOR_1_REVERSE_DIRECTION};
 
 // Force limit for step response safety (shared across both motors)
@@ -63,18 +81,20 @@ EndStopSwitch* endstops[NUM_ACTUATORS] = {&endstop0, &endstop1};
 // FORCE CONTROL (PID regulation per motor)
 // ============================================================================
 
-#define DEFAULT_KP              50.0f
-#define DEFAULT_KI              0.5f
-#define DEFAULT_KD              10.0f
+// Re-derived for the new +-300 centi-rad/s output range (previously +-3000 raw
+// servo-speed steps) - starting point only, needs field retuning against the
+// actual RobStride motors, same as main.cpp's DEFAULT_KP/KI/KD.
+#define DEFAULT_KP              5.0f
+#define DEFAULT_KI              0.05f
+#define DEFAULT_KD              1.0f
 #define DEFAULT_PID_SAMPLE_TIME 10.0f   // ms
 
 ForceControlLoop* controlLoops[NUM_ACTUATORS];
 bool isForceControlRunning[NUM_ACTUATORS] = {false, false};
 float forceSetpoint_N[NUM_ACTUATORS] = {0.0f, 0.0f};
 
-HardwareSerial servoSerial(2);
-MotorDriver*   motors[NUM_ACTUATORS];
-ForceSensor*   sensors[NUM_ACTUATORS];
+MotorDriverRobStride* motors[NUM_ACTUATORS];
+ForceSensor*          sensors[NUM_ACTUATORS];
 
 // ============================================================================
 // BINARY TELEMETRY PROTOCOL (both motors in one packet)
@@ -102,16 +122,18 @@ const uint8_t step_end_header[2] = {0xBB, 0x66};
 // ROPE LENGTH CALCULATION (wrap-around aware, cumulative, per motor)
 // ============================================================================
 
-inline float calculateRopeLength(int idx, int currentMotorPos) {
-    int16_t deltaSteps = (int16_t)(currentMotorPos - prevMotorPos[idx]);
-    if (reverseDirection[idx]) deltaSteps = -deltaSteps;
+inline float calculateRopeLength(int idx, float currentMotorPosRad) {
+    float deltaRad = currentMotorPosRad - prevMotorPos_rad[idx];
+    if (reverseDirection[idx]) deltaRad = -deltaRad;
 
-    // Handle encoder wrap (4096 steps per rotation)
-    if (deltaSteps > 2047)       deltaSteps -= 4096;
-    else if (deltaSteps < -2047) deltaSteps += 4096;
+    // cur_angle wraps at +-4*PI (16-bit fixed-point register behind it, see
+    // TWAI_CAN_MI_Motor.cpp's INT2ANGLE) - same idea as the old Feetech
+    // 4096-steps/rev wrap, just a bigger span (2 mechanical turns instead of 1).
+    if (deltaRad > 4.0f * PI)       deltaRad -= 8.0f * PI;
+    else if (deltaRad < -4.0f * PI) deltaRad += 8.0f * PI;
 
-    totalRopeLength_mm[idx] += deltaSteps * MM_PER_STEP;
-    prevMotorPos[idx] = currentMotorPos;
+    totalRopeLength_mm[idx] += deltaRad * MM_PER_RAD;
+    prevMotorPos_rad[idx] = currentMotorPosRad;
     return totalRopeLength_mm[idx];
 }
 
@@ -130,7 +152,7 @@ void printStatus_binary() {
     currentStatus.timestamp_us = micros();
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         currentStatus.tendon_force[i]  = sensors[i]->getForce();
-        currentStatus.ropeLength_mm[i] = calculateRopeLength(i, motors[i]->getPosition());
+        currentStatus.ropeLength_mm[i] = calculateRopeLength(i, motors[i]->getPositionRad());
     }
     Serial.write(header, sizeof(header));
     Serial.write((uint8_t*)&currentStatus, sizeof(currentStatus));
@@ -140,7 +162,7 @@ void printStatus_human() {
     currentStatus.timestamp_us = micros();
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         currentStatus.tendon_force[i]  = sensors[i]->getForce();
-        currentStatus.ropeLength_mm[i] = calculateRopeLength(i, motors[i]->getPosition());
+        currentStatus.ropeLength_mm[i] = calculateRopeLength(i, motors[i]->getPositionRad());
     }
     Serial.printf("Time=%lu | M0: F=%.3f/%.1fN L=%.1fmm %s | M1: F=%.3f/%.1fN L=%.1fmm %s | FlLim=%.1fN\n",
         currentStatus.timestamp_us,
@@ -162,6 +184,7 @@ void stepResponse_forceLimited(int idx, int speed, uint32_t max_duration_ms) {
 
     while (millis() - start_time < max_duration_ms) {
         for (int i = 0; i < NUM_ACTUATORS; i++) sensors[i]->update();
+        for (int i = 0; i < NUM_ACTUATORS; i++) motors[i]->poll();
 
         // Force limit on the active motor
         if (sensors[idx]->getForce() >= maxTargetForce_N) {
@@ -196,7 +219,7 @@ void performHoming(int idx) {
 
     if (endstops[idx]->isRawTriggered()) {
         totalRopeLength_mm[idx] = 0.0f;
-        prevMotorPos[idx] = motors[idx]->getPosition();
+        prevMotorPos_rad[idx] = motors[idx]->getPositionRad();
         Serial.printf("Motor %d: already at endstop -- position zeroed\n", idx);
         return;
     }
@@ -209,13 +232,14 @@ void performHoming(int idx) {
     while (millis() < deadline) {
         endstops[idx]->update();
         for (int i = 0; i < NUM_ACTUATORS; i++) sensors[i]->update();
+        for (int i = 0; i < NUM_ACTUATORS; i++) motors[i]->poll();
         printStatus_binary();
 
         if (endstops[idx]->isRawTriggered()) {
             motors[idx]->setSpeed(0);
             delay(10);
             totalRopeLength_mm[idx] = 0.0f;
-            prevMotorPos[idx] = motors[idx]->getPosition();
+            prevMotorPos_rad[idx] = motors[idx]->getPositionRad();
             Serial.printf("Motor %d: HOME found -- position zeroed\n", idx);
             return;
         }
@@ -234,14 +258,15 @@ void returnToZero(int idx) {
     motors[idx]->setMode(MODE_WHEEL);
 
     float tolerance_mm = 0.2f;
-    int return_speed = (totalRopeLength_mm[idx] > 0) ? -800 : 800;
+    int return_speed = (totalRopeLength_mm[idx] > 0) ? -80 : 80;
     motors[idx]->setSpeed(return_speed);
 
     const unsigned long deadline = millis() + 30000;
 
     while (fabsf(totalRopeLength_mm[idx]) > tolerance_mm && millis() < deadline) {
         for (int i = 0; i < NUM_ACTUATORS; i++) sensors[i]->update();
-        calculateRopeLength(idx, motors[idx]->getPosition());
+        for (int i = 0; i < NUM_ACTUATORS; i++) motors[i]->poll();
+        calculateRopeLength(idx, motors[idx]->getPositionRad());
 
         if (fabsf(totalRopeLength_mm[idx]) < 5.0f) {
             motors[idx]->setSpeed(return_speed / 10);
@@ -259,7 +284,7 @@ void returnToZero(int idx) {
 
     motors[idx]->setSpeed(0);
     totalRopeLength_mm[idx] = 0.0f;
-    prevMotorPos[idx] = motors[idx]->getPosition();
+    prevMotorPos_rad[idx] = motors[idx]->getPositionRad();
     Serial.printf("Motor %d: home OK\n", idx);
 }
 
@@ -268,18 +293,17 @@ void returnToZero(int idx) {
 // ============================================================================
 
 void initMotor(int idx, uint8_t servoId, bool reverse) {
-    Serial.printf("MotorDriver ID %d...", servoId);
-    motors[idx] = new MotorDriver(servoId, &servoSerial);
-    delay(50);
-    int pos = motors[idx]->getPosition();
-    if (pos == -1) {
+    Serial.printf("MotorDriverRobStride CAN ID %d...", servoId);
+    motors[idx] = new MotorDriverRobStride(servoId, MOTOR_HOLD_KP, MOTOR_HOLD_KD,
+                                            MOTOR_SPEED_KD, MOTOR_TORQUE_LIMIT_NM, MOTOR_CURRENT_LIMIT_A);
+    if (!motors[idx]->begin()) {
         Serial.println(" FAILED");
         while (1) delay(1000);
     }
     motors[idx]->setReverseDirection(reverse);
-    prevMotorPos[idx] = motors[idx]->getPosition();
+    prevMotorPos_rad[idx] = motors[idx]->getPositionRad();
     totalRopeLength_mm[idx] = 0.0f;
-    Serial.printf(" OK (pos=%d)\n", pos);
+    Serial.printf(" OK (pos=%.3f rad)\n", prevMotorPos_rad[idx]);
 }
 
 void initSensor(int idx, uint8_t muxChannel, long offset, float scale) {
@@ -305,8 +329,8 @@ void setup() {
     Wire.begin();
     Wire.setClock(400000);
 
-    servoSerial.begin(1000000, SERIAL_8N1, MOTOR_RX_PIN, MOTOR_TX_PIN);
-    delay(100);
+    Motor_CAN_Init();
+    delay(200);
 
     // Motors
     Serial.println("=== Motor Initialization ===");
@@ -498,12 +522,12 @@ void processSerialCommands() {
             if (id == -1) {
                 for (int i = 0; i < NUM_ACTUATORS; i++) {
                     totalRopeLength_mm[i] = 0.0f;
-                    prevMotorPos[i] = motors[i]->getPosition();
+                    prevMotorPos_rad[i] = motors[i]->getPositionRad();
                 }
                 Serial.println("All rope lengths nulled");
             } else {
                 totalRopeLength_mm[id] = 0.0f;
-                prevMotorPos[id] = motors[id]->getPosition();
+                prevMotorPos_rad[id] = motors[id]->getPositionRad();
                 Serial.printf("Motor %d: rope length nulled\n", id);
             }
         }
@@ -585,6 +609,11 @@ void loop() {
     // 2. Update sensors (non-blocking ADC poll)
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         sensors[i]->update();
+    }
+
+    // 2b. Drain CAN feedback frames (non-blocking)
+    for (int i = 0; i < NUM_ACTUATORS; i++) {
+        motors[i]->poll();
     }
 
     // 3. Force control loop update (PID → motor speed)

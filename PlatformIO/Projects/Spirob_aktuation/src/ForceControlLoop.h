@@ -1,7 +1,7 @@
 #ifndef FORCE_CONTROL_LOOP_H
 #define FORCE_CONTROL_LOOP_H
 
-#include "MotorDriver.h"
+#include "IMotorDriver.h"
 #include "ForceSensor.h"
 #include "PidController.h"
 
@@ -17,7 +17,7 @@ enum ControlMode {
 
 class ForceControlLoop {
 private:
-    MotorDriver* motorDriver;
+    IMotorDriver* motorDriver;
     ForceSensor* forceSensor;
     PidController pid;
     ControlMode mode;
@@ -29,7 +29,7 @@ private:
     float Output;
 
 public:
-    ForceControlLoop(MotorDriver* md, ForceSensor* fs);
+    ForceControlLoop(IMotorDriver* md, ForceSensor* fs);
     void setMode(ControlMode m);
     void setManualPosition(float pos);
     void setSpeedSetpoint(float speed);

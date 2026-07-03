@@ -56,11 +56,11 @@ def drain_telemetry(ser: serial.Serial):
 
 spec = mj.MjSpec.from_file("spiral_chain.xml")
 
-cylinder = spec.worldbody.add_body(name="cylinder", pos=[0.1, 0.0, 0.1])
+cylinder = spec.worldbody.add_body(name="cylinder", pos=[-0.11, 0.00, 0.11])
 cylinder.add_geom(
     name="cyl_geom",
     type=mj.mjtGeom.mjGEOM_CYLINDER,
-    size=[0.02, 0.1, 0.01],
+    size=[0.05, 0.15, 0.05],
     euler=[90, 0, 0],
     rgba=[0.2, 0.8, 0.5, 1],
     density=1000,
@@ -94,7 +94,7 @@ last_send_t = 0.0
 try:
     with mj.viewer.launch_passive(model, data) as v:
         t0 = time.time()
-        while v.is_running() and time.time() - t0 < 360:
+        while v.is_running():
             step_start = time.time()
 
             # 1) Read actuator ctrl values from GUI (Newtons)

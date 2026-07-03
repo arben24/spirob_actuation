@@ -1,6 +1,14 @@
+/*
+ * Dual motor force control - drives two RobStride/CyberGear motors on the same
+ * CAN bus (CAN ID 1 = Motor 0, CAN ID 2 = Motor 1, same IDs as the Feetech
+ * servos this replaces). Each motor stays in CTRL_MODE (MIT frame) the whole
+ * time; the force PID's output is sent as a speed target tracked via the MIT
+ * frame's kd damping term (kp=0, torque=0) - see MotorDriverRobStride.h.
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
-#include "MotorDriver.h"
+#include "MotorDriverRobStride.h"
 #include "ForceSensorHX711.h"
 #include "ForceSensorAnu78025.h"
 #include "ForceControlLoop.h"
@@ -40,21 +48,32 @@ void printHelp();
 // ============================================================================
 
 #define NUM_ACTUATORS             2
-#define MOTOR_RX_PIN              16
-#define MOTOR_TX_PIN              17
-#define DEFAULT_MAX_SPEED         3000
 
-// Default PID tunings (tunable via CLI)
-#define DEFAULT_KP                30.0
-#define DEFAULT_KI                0.5
+// PID output / motor speed target, in centi-rad/s (see MotorDriverRobStride.h
+// unit convention). 300 = 3.0 rad/s - a conservative starting point, not yet
+// tuned on hardware.
+#define DEFAULT_MAX_SPEED         300
+
+// RobStride MIT-frame gains, shared by both motors. Placeholders - need
+// field tuning, same as the force calibration constants above.
+#define MOTOR_HOLD_KP             10.0f   // position-hold stiffness (MODE_SERVO_POSITION)
+#define MOTOR_HOLD_KD             1.0f    // position-hold damping (MODE_SERVO_POSITION)
+#define MOTOR_SPEED_KD            1.0f    // speed-tracking damping (MODE_WHEEL)
+#define MOTOR_TORQUE_LIMIT_NM     6.0f    // hardware safety cap, independent of control mode
+#define MOTOR_CURRENT_LIMIT_A     10.0f   // hardware safety cap, independent of control mode
+
+// Force PID tunings (tunable via CLI). Re-derived for the new ±300 centi-rad/s
+// output range (previously ±3000 raw servo-speed steps) - starting point
+// only, needs field retuning against the actual RobStride motors.
+#define DEFAULT_KP                0.3
+#define DEFAULT_KI                0.005
 #define DEFAULT_KD                0.0
 
 // ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
 
-HardwareSerial servoSerial(2);              // Serial2 for servo
-MotorDriver* motors[NUM_ACTUATORS];
+MotorDriverRobStride* motors[NUM_ACTUATORS];
 ForceSensor* sensors[NUM_ACTUATORS];
 ForceControlLoop* controlLoops[NUM_ACTUATORS];
 
@@ -77,23 +96,22 @@ void setup() {
     delay(1000);
     
     Wire.begin();
-    
-    servoSerial.begin(1000000, SERIAL_8N1, MOTOR_RX_PIN, MOTOR_TX_PIN);
-    delay(100);
+
+    Motor_CAN_Init();
+    delay(200);
 
     Serial.println("\n=== Spirob Aktuation - Dual Motor Force Control ===");
-    Serial.println("Motor 0: Servo ID 1 (HX711)");
-    Serial.println("Motor 1: Servo ID 2 (ANU78025)");
+    Serial.println("Motor 0: CAN ID 1 (HX711)");
+    Serial.println("Motor 1: CAN ID 2 (ANU78025)");
     Serial.println();
 
     // === Initialize Motor 0 (HX711) ===
     Serial.println("--- Motor 0 Initialization ---");
-    
-    Serial.print("MotorDriver ID 1...");
-    motors[0] = new MotorDriver(MOTOR_0_ID, &servoSerial);
-    delay(50);
-    int pos = motors[0]->getPosition();
-    if (pos == -1) {
+
+    Serial.print("MotorDriverRobStride CAN ID 1...");
+    motors[0] = new MotorDriverRobStride(MOTOR_0_ID, MOTOR_HOLD_KP, MOTOR_HOLD_KD,
+                                          MOTOR_SPEED_KD, MOTOR_TORQUE_LIMIT_NM, MOTOR_CURRENT_LIMIT_A);
+    if (!motors[0]->begin()) {
         Serial.println(" FAILED");
         while (1) delay(1000);
     }
@@ -121,11 +139,10 @@ void setup() {
     // === Initialize Motor 1 (ANU78025) ===
     Serial.println("--- Motor 1 Initialization ---");
     
-    Serial.print("MotorDriver ID 2...");
-    motors[1] = new MotorDriver(MOTOR_1_ID, &servoSerial);
-    delay(50);
-    pos = motors[1]->getPosition();
-    if (pos == -1) {
+    Serial.print("MotorDriverRobStride CAN ID 2...");
+    motors[1] = new MotorDriverRobStride(MOTOR_1_ID, MOTOR_HOLD_KP, MOTOR_HOLD_KD,
+                                          MOTOR_SPEED_KD, MOTOR_TORQUE_LIMIT_NM, MOTOR_CURRENT_LIMIT_A);
+    if (!motors[1]->begin()) {
         Serial.println(" FAILED");
         while (1) delay(1000);
     }
@@ -167,11 +184,11 @@ void setup() {
 void printStatus() {
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         float forceActual = sensors[i]->getForce();
-        int motorPos = motors[i]->getPosition();
-        int motorSpeed = motors[i]->getSpeed();
-        
-        Serial.printf(" M%d: Force= %.3f / %.3f N | Pos= %5d | Speed= %5d | %s",
-            i, forceActual, forceSetpoint[i], motorPos, motorSpeed,
+        float motorPosRad = motors[i]->getPosition() / 100.0f;
+        float motorSpeedRadS = motors[i]->getSpeed() / 100.0f;
+
+        Serial.printf(" M%d: Force= %.3f / %.3f N | Pos= %6.2f rad | Speed= %6.2f rad/s | %s",
+            i, forceActual, forceSetpoint[i], motorPosRad, motorSpeedRadS,
             isRunning[i] ? "RUN" : "STOP");
     }
     Serial.println();
@@ -387,7 +404,12 @@ void loop() {
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         sensors[i]->update();
     }
-    
+
+    // --- 1b. Drain CAN feedback frames (non-blocking) ---
+    for (int i = 0; i < NUM_ACTUATORS; i++) {
+        motors[i]->poll();
+    }
+
     for (int i = 0; i < NUM_ACTUATORS; i++) {
         if (isRunning[i]) {
             float output = controlLoops[i]->update();

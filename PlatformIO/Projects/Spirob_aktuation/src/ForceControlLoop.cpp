@@ -1,6 +1,6 @@
 #include "ForceControlLoop.h"
 
-ForceControlLoop::ForceControlLoop(MotorDriver* md, ForceSensor* fs)
+ForceControlLoop::ForceControlLoop(IMotorDriver* md, ForceSensor* fs)
     : motorDriver(md), forceSensor(fs), mode(MODE_MANUAL_POSITION), manualPosition(0.0), speedSetpoint(0.0), forceSetpoint(0.0), maxSpeed(3000.0) {
     pid.setOutputLimits(-maxSpeed, maxSpeed);
 }

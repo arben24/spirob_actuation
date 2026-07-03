@@ -7,9 +7,9 @@
   </default>
   <worldbody>
     <body name="base" pos="0 0 0">
-      <geom type="plane" size="2 2 0.1" rgba="0 0 1 0.6" contype="1" conaffinity="1"/>
+      <geom type="plane" size="2 2 0.1" pos="0 0 -0.053" rgba="0 0 1 0.6" contype="1" conaffinity="1"/>
       <!-- Der eigentliche Ketten-Root wird hier als Kind erzeugt -->
-      <body name="seg_13" pos="0 0 0.0564484">
+      <body name="seg_13" pos="0 0 0.0">
                 <geom name="g_13" type="box" size="0.0458798 0.0458798 0.0258984" pos="0 0 0.0258984" 
                     rgba="0.2 0.7 0.2 0.3" contype="1" conaffinity="1" density="1100"/>
                 <site name="site_imu_13"  pos="0 0 0.0258984" size="0.001" rgba="1 0 1 1"/>

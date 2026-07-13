@@ -15,6 +15,7 @@ import time
 import struct
 import numpy as np
 import serial
+import tkinter as tk
 
 # ── Serial config (same as live_monitor_simple.py) ──────────────────────────
 PORT = "/dev/ttyUSB0"
@@ -52,6 +53,89 @@ def drain_telemetry(ser: serial.Serial):
     return latest
 
 
+# ── PID tuning GUI ───────────────────────────────────────────────────────────
+# Live Kp/Ki/Kd sliders so gains can be tried out without reflashing the ESP32.
+# main_SystemIdentification.cpp's "pid" command needs a specific motor (0 or 1)
+# - unlike production's "pid all ...", there's no "all" here - so "Beide" just
+# sends the command twice.
+
+PID_KP_RANGE = (0.0, 30.0)
+PID_KI_RANGE = (0.0, 1.0)
+PID_KD_RANGE = (0.0, 5.0)
+PID_GUI_SEND_HZ = 5  # max rate for "pid ..." commands while dragging a slider
+PID_GUI_SEND_INTERVAL = 1.0 / PID_GUI_SEND_HZ
+
+# Initial slider positions - mirror the firmware's current DEFAULT_KP/KI/KD in
+# main_SystemIdentification.cpp, but are otherwise independent (dragging a
+# slider just sends a new "pid" command, it doesn't read the value back).
+PID_KP_INIT = 10.0
+PID_KI_INIT = 0.05
+PID_KD_INIT = 0.2
+
+
+class PidTuningGUI:
+    """Small always-on-top slider panel. Call poll() once per simulation frame -
+    it pumps Tk's event loop cooperatively instead of blocking on mainloop()."""
+
+    def __init__(self, ser: serial.Serial):
+        self.ser = ser
+        self._closed = False
+        self._last_sent = None
+        self._last_send_t = 0.0
+
+        self.root = tk.Tk()
+        self.root.title("PID Tuning")
+        self.root.attributes("-topmost", True)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self.motor_var = tk.StringVar(value="Beide")
+        tk.OptionMenu(self.root, self.motor_var, "Motor 0", "Motor 1", "Beide").grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(6, 2)
+        )
+
+        self.kp_var = self._add_slider("Kp", 1, PID_KP_RANGE, 0.01, PID_KP_INIT)
+        self.ki_var = self._add_slider("Ki", 2, PID_KI_RANGE, 0.001, PID_KI_INIT)
+        self.kd_var = self._add_slider("Kd", 3, PID_KD_RANGE, 0.01, PID_KD_INIT)
+
+    def _add_slider(self, label, row, value_range, resolution, default):
+        tk.Label(self.root, text=label).grid(row=row, column=0, sticky="w", padx=6)
+        var = tk.DoubleVar(value=default)
+        tk.Scale(
+            self.root, variable=var, from_=value_range[0], to=value_range[1],
+            resolution=resolution, orient=tk.HORIZONTAL, length=260,
+        ).grid(row=row, column=1, padx=6, pady=2)
+        return var
+
+    def _on_close(self):
+        self._closed = True
+        self.root.destroy()
+
+    def poll(self) -> bool:
+        """Returns False once the window has been closed (nothing left to do)."""
+        if self._closed:
+            return False
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            self._closed = True
+            return False
+
+        now = time.time()
+        if now - self._last_send_t < PID_GUI_SEND_INTERVAL:
+            return True
+
+        gains = (self.kp_var.get(), self.ki_var.get(), self.kd_var.get())
+        if gains != self._last_sent:
+            motor_ids = {"Motor 0": [0], "Motor 1": [1], "Beide": [0, 1]}[self.motor_var.get()]
+            kp, ki, kd = gains
+            for m in motor_ids:
+                send_cmd(self.ser, f"pid {m} {kp:.3f} {ki:.4f} {kd:.3f}")
+            self._last_sent = gains
+            self._last_send_t = now
+        return True
+
+
 # ── MuJoCo model setup ──────────────────────────────────────────────────────
 
 spec = mj.MjSpec.from_file("spiral_chain.xml")
@@ -85,6 +169,8 @@ print(f"Verbunden: {PORT} @ {BAUDRATE}")
 send_cmd(ser, "start all")
 print("Kraftregelung gestartet (start all)")
 
+pid_gui = PidTuningGUI(ser)
+
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 
@@ -111,6 +197,9 @@ try:
                     send_cmd(ser, f"f 1 {f1:.2f}")
                     prev_f[1] = f1
                 last_send_t = now
+
+            # 2b) Pump the PID tuning GUI (cooperative, non-blocking)
+            pid_gui.poll()
 
             # 3) Drain hardware telemetry (prevents serial buffer overflow)
             hw = drain_telemetry(ser)

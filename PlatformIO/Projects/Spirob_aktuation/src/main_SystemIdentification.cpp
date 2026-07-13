@@ -29,8 +29,8 @@
 #define MOTOR_1_ID                2
 #define MOTOR_1_REVERSE_DIRECTION false   
 #define MOTOR_1_MUX_CHANNEL       1
-#define FORCE_OFFSET_1            -108743L  
-#define FORCE_SCALE_1             104.81184f
+#define FORCE_OFFSET_1            119310L  
+#define FORCE_SCALE_1             101.71526f
 #define ENDSTOP_1_PIN             26      // Endstop for motor 1
 
 // ============================================================================
@@ -84,10 +84,10 @@ EndStopSwitch* endstops[NUM_ACTUATORS] = {&endstop0, &endstop1};
 // Re-derived for the new +-300 centi-rad/s output range (previously +-3000 raw
 // servo-speed steps) - starting point only, needs field retuning against the
 // actual RobStride motors, same as main.cpp's DEFAULT_KP/KI/KD.
-#define DEFAULT_KP              5.0f
+#define DEFAULT_KP              10.0f
 #define DEFAULT_KI              0.05f
-#define DEFAULT_KD              1.0f
-#define DEFAULT_PID_SAMPLE_TIME 10.0f   // ms
+#define DEFAULT_KD              0.2f
+#define DEFAULT_PID_SAMPLE_TIME 50.0f   // ms
 
 ForceControlLoop* controlLoops[NUM_ACTUATORS];
 bool isForceControlRunning[NUM_ACTUATORS] = {false, false};

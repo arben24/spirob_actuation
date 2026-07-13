@@ -5,11 +5,11 @@
 // --- Hardware Einstellungen ---
 #define I2C_MULTIPLEXER_ADDR 0x70  // Adresse des TCA9548A Multiplexers
 #define ANU78025_I2C_ADDR    0x2A  // Standardadresse NAU7802
-#define MULTIPLEXER_CHANNEL  7     // Kanal am Multiplexer
+#define MULTIPLEXER_CHANNEL  1     // Kanal am Multiplexer
 
 // --- Kalibrierung (Hier Werte eintragen nach erfolgreicher Kalibrierung) ---
-//#define OFFSET 153859L    // Beispiel: Deinen Offset hier einkommentieren
-//#define SCALE  105.13830   // Beispiel: Deinen Scale hier einkommentieren
+#define OFFSET 119310L   // Beispiel: Deinen Offset hier einkommentieren
+#define SCALE  101.71526   // Beispiel: Deinen Scale hier einkommentieren
 
 ForceSensorAnu78025* sensor;
 

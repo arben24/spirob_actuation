@@ -242,8 +242,8 @@
     </spatial>
   </tendon>
   <actuator>
-    <motor name="tendon_act_0" tendon="tendon_0" gear="1" forcerange="-200 200" ctrlrange="-150 0"/>
-    <motor name="tendon_act_1" tendon="tendon_1" gear="1" forcerange="-200 200" ctrlrange="-150 0"/>
+    <motor name="tendon_act_0" tendon="tendon_0" gear="1" forcerange="-200 200" ctrlrange="-250 0"/>
+    <motor name="tendon_act_1" tendon="tendon_1" gear="1" forcerange="-200 200" ctrlrange="-250 0"/>
   </actuator>
   <sensor>
 <tendonactuatorfrc name="tendonfrc_0" tendon="tendon_0"/>

@@ -14,12 +14,13 @@ bool MotorDriverRobStride::begin(uint32_t timeoutMs) {
     motor.Motor_Con_Init(motorId);
     delay(20);
 
-    // Zeroes mechanical position to "now". Safe here because production only
-    // uses the force sensor as feedback - nothing depends on an absolute rope
-    // position surviving a reboot (unlike the homing/EndStopSwitch flow used
-    // for system identification).
-    motor.Motor_Set_Zero();
-    delay(100);
+    // Deliberately does NOT call Motor_Set_Zero() here (unlike the vendor's
+    // usual init order) and does NOT send a position-hold frame below: neither
+    // main.cpp nor main_SystemIdentification.cpp depends on an absolute
+    // position reference across reboots (system-id's rope-length tracking
+    // seeds its own zero from whatever position is read right after begin()).
+    // Re-zeroing + holding at that fresh zero with a stiff kp is exactly what
+    // made the motor visibly snap to a fixed "start position" on every boot.
 
     motor.Change_Mode(CTRL_MODE);
     delay(20);
@@ -31,8 +32,10 @@ bool MotorDriverRobStride::begin(uint32_t timeoutMs) {
     motor.Motor_Enable();
     delay(50);
 
-    // Hold at the freshly-zeroed position until a mode/setpoint is chosen.
-    sendControlFrame(0.0f, 0.0f, 0.0f, holdKp, holdKd);
+    // Fully passive (torque=0, kp=0, kd=0): no position/speed target, so the
+    // motor just stays wherever it physically is. It only starts actively
+    // holding/moving once setMode()/setSpeed() is called.
+    sendControlFrame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 
     unsigned long start = millis();
     while (millis() - start < timeoutMs) {
